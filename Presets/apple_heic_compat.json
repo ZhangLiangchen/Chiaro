@@ -1,0 +1,41 @@
+{
+  "id": "apple_heic_compat",
+  "name": "Apple 兼容全代（含 iOS 14–17）",
+  "description": "10-bit Display P3 HEIC with mandatory 1-channel monochrome gain map dual-writing ISO 21496-1 tmap and legacy Apple HDRGainMap.",
+  "outputFormats": ["heic"],
+  "bitDepth": 10,
+  "baseColorSpace": "displayP3",
+  "gainMapChannels": "mono1ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.5,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 0.0,
+    "blackPoint": 0.0,
+    "vibrance": 0.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.0,
+    "sdrHighlightCompression": 50.0,
+    "sdrContrast": 0.0,
+    "sdrSaturation": 0.0,
+    "hdrHighlightExcitation": 60.0,
+    "hdrRolloffSoftness": 50.0
+  },
+  "cropAspect": "original",
+  "maxLongEdge": null,
+  "targetMaxFileBytes": null,
+  "quality": 0.90,
+  "gainMapQuality": 0.90,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": true,
+    "writeUltrahdrXMP": false,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": false
+  },
+  "hlgVideoOptions": null,
+  "platformAdvisory": "双写 ISO tmap 与旧版 Apple HDRGainMap（强制单通道 L008 并锁定 gainMapMin=0、gainMapMax=log2(H)），兼容 iOS 14–17 与 macOS 11–14 设备。"
+}

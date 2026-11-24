@@ -1,0 +1,46 @@
+{
+  "id": "douyin_hlg_mp4",
+  "name": "抖音必亮 HDR 动态图（10-bit HLG MP4）",
+  "description": "10-bit HEVC Main10 BT.2020 HLG Video Range MP4 (1080x1920, 4.0s, 30fps, 14Mbps) for guaranteed Douyin OLED HDR.",
+  "outputFormats": ["hlgMP4"],
+  "bitDepth": 10,
+  "baseColorSpace": "displayP3",
+  "gainMapChannels": "mono1ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.75,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 0.0,
+    "blackPoint": 0.0,
+    "vibrance": 0.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.0,
+    "sdrHighlightCompression": 50.0,
+    "sdrContrast": 0.0,
+    "sdrSaturation": 0.0,
+    "hdrHighlightExcitation": 75.0,
+    "hdrRolloffSoftness": 55.0
+  },
+  "cropAspect": "9:16",
+  "maxLongEdge": 1920,
+  "targetMaxFileBytes": null,
+  "quality": 0.90,
+  "gainMapQuality": null,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": false,
+    "writeUltrahdrXMP": false,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": false
+  },
+  "hlgVideoOptions": {
+    "aspect": "9:16",
+    "durationSeconds": 4.0,
+    "fps": 30,
+    "bitrateMbps": 14.0
+  },
+  "platformAdvisory": "请经抖音 iOS App 上传并开启「高清发布」，100% 稳定触发 OLED HDR（严禁导出 4K 以防二次压坏；iOS 相册同时显示原生 HDR 视频角标）。"
+}

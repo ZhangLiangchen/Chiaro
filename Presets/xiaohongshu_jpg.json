@@ -1,0 +1,41 @@
+{
+  "id": "xiaohongshu_jpg",
+  "name": "小红书 HDR（推荐）",
+  "description": "8-bit Display P3 Ultra HDR v1.1 JPEG (1ch mono, closed-loop SDR compensation, 3:4 crop, <=2048px, <=4MB).",
+  "outputFormats": ["jpeg"],
+  "bitDepth": 8,
+  "baseColorSpace": "displayP3",
+  "gainMapChannels": "mono1ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.5,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 0.0,
+    "blackPoint": 0.0,
+    "vibrance": 0.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.0,
+    "sdrHighlightCompression": 50.0,
+    "sdrContrast": 4.0,
+    "sdrSaturation": 4.0,
+    "hdrHighlightExcitation": 60.0,
+    "hdrRolloffSoftness": 50.0
+  },
+  "cropAspect": "3:4",
+  "maxLongEdge": 2048,
+  "targetMaxFileBytes": 4194304,
+  "quality": 0.90,
+  "gainMapQuality": 0.85,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": false,
+    "writeUltrahdrXMP": true,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": true
+  },
+  "hlgVideoOptions": null,
+  "platformAdvisory": "请经 AirDrop 原图传至手机并用最新版小红书 iOS App 直接从相册发布；严禁网页端上传，严禁站内裁剪、加滤镜、贴纸或花字，同贴多图请保持统一画幅比例。"
+}

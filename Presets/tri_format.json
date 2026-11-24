@@ -1,0 +1,41 @@
+{
+  "id": "tri_format",
+  "name": "全平台三格式一键归档",
+  "description": "Concurrent fan-out from single RAW decode & Metal render: 10-bit P3 HEIC + AVIF (3ch ISO tmap, auto Grid Tiling) & 8-bit P3 JPEG (1ch Ultra HDR v1.1).",
+  "outputFormats": ["heic", "jpeg", "avif"],
+  "bitDepth": 10,
+  "baseColorSpace": "displayP3",
+  "gainMapChannels": "rgb3ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.5,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 0.0,
+    "blackPoint": 0.0,
+    "vibrance": 0.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.0,
+    "sdrHighlightCompression": 50.0,
+    "sdrContrast": 0.0,
+    "sdrSaturation": 0.0,
+    "hdrHighlightExcitation": 60.0,
+    "hdrRolloffSoftness": 50.0
+  },
+  "cropAspect": "original",
+  "maxLongEdge": null,
+  "targetMaxFileBytes": null,
+  "quality": 0.90,
+  "gainMapQuality": 0.85,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": false,
+    "writeUltrahdrXMP": true,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": true
+  },
+  "hlgVideoOptions": null,
+  "platformAdvisory": "一次解码并发扇出三套同源 ISO 21496-1 成品：HEIC（10-bit 3ch，Apple 相册首选）、JPEG（8-bit 1ch Ultra HDR v1.1，跨平台通用）、AVIF（10-bit 3ch + 自动 MIAF Grid Tiling，高压缩归档）。"
+}

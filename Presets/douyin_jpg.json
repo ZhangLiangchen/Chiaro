@@ -1,0 +1,41 @@
+{
+  "id": "douyin_jpg",
+  "name": "抖音图文 HDR 兼容",
+  "description": "8-bit sRGB Ultra HDR v1.1 JPEG (1ch mono, enhanced SDR contrast/saturation, 3:4 <=1440px, <=3MB, +2.25 EV).",
+  "outputFormats": ["jpeg"],
+  "bitDepth": 8,
+  "baseColorSpace": "srgb",
+  "gainMapChannels": "mono1ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.25,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 5.0,
+    "blackPoint": 0.0,
+    "vibrance": 8.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.05,
+    "sdrHighlightCompression": 55.0,
+    "sdrContrast": 18.0,
+    "sdrSaturation": 14.0,
+    "hdrHighlightExcitation": 60.0,
+    "hdrRolloffSoftness": 50.0
+  },
+  "cropAspect": "3:4",
+  "maxLongEdge": 1440,
+  "targetMaxFileBytes": 3145728,
+  "quality": 0.88,
+  "gainMapQuality": 0.85,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": false,
+    "writeUltrahdrXMP": true,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": true
+  },
+  "hlgVideoOptions": null,
+  "platformAdvisory": "透明提示：抖音图文静态照目前多数仍会被服务端降级为 SDR，本预设增强 SDR 支路反差与饱和度以防发灰并前向兼容 veImageX；需 100% 必亮 OLED HDR 请选用「抖音必亮 HDR 动态图」预设。"
+}

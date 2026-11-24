@@ -1,0 +1,5 @@
+.src/
+.build/
+.cache/
+install/
+XCFrameworks/

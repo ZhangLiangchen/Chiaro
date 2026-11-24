@@ -1,0 +1,41 @@
+{
+  "id": "avif_archive",
+  "name": "次时代 Web / 极致压缩归档（AVIF）",
+  "description": "10-bit Display P3 Full-Range YUV420 AVIF with 3-channel ISO 21496-1 tmap and automatic MIAF Baseline 5.1 Grid Tiling (>4096px or >8.9MP).",
+  "outputFormats": ["avif"],
+  "bitDepth": 10,
+  "baseColorSpace": "displayP3",
+  "gainMapChannels": "rgb3ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.5,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 0.0,
+    "blackPoint": 0.0,
+    "vibrance": 0.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.0,
+    "sdrHighlightCompression": 50.0,
+    "sdrContrast": 0.0,
+    "sdrSaturation": 0.0,
+    "hdrHighlightExcitation": 60.0,
+    "hdrRolloffSoftness": 50.0
+  },
+  "cropAspect": "original",
+  "maxLongEdge": null,
+  "targetMaxFileBytes": null,
+  "quality": 0.80,
+  "gainMapQuality": 0.80,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": false,
+    "writeUltrahdrXMP": false,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": false
+  },
+  "hlgVideoOptions": null,
+  "platformAdvisory": "采用 libavif + SVT-AV1/libaom 编码并自动启用 MIAF 5.1 Grid Tiling，同时通过 Apple ImageIO 与 avifdec 双向校验；不适合直接上传小红书/抖音，且 iCloud 相册同步 AVIF 存在已知缓存限制。"
+}

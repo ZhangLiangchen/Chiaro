@@ -1,0 +1,41 @@
+{
+  "id": "apple_heic",
+  "name": "Apple 相册原生高保真（默认）",
+  "description": "10-bit Display P3 HEIC with 3-channel RGB ISO 21496-1 tmap gain map via Apple Media Engine hardware HEVC.",
+  "outputFormats": ["heic"],
+  "bitDepth": 10,
+  "baseColorSpace": "displayP3",
+  "gainMapChannels": "rgb3ch",
+  "gainMapResolution": "half",
+  "gainMapGamma": 1.0,
+  "targetHeadroomStops": 2.5,
+  "midtoneAnchorP": 0.80,
+  "sdrToneMapper": "agx",
+  "developDefaults": {
+    "exposureEV": 0.0,
+    "shadowRecovery": 0.0,
+    "blackPoint": 0.0,
+    "vibrance": 0.0,
+    "highlightReconstruction": "opposedInpaint",
+    "sdrExposureEV": 0.0,
+    "sdrHighlightCompression": 50.0,
+    "sdrContrast": 0.0,
+    "sdrSaturation": 0.0,
+    "hdrHighlightExcitation": 60.0,
+    "hdrRolloffSoftness": 50.0
+  },
+  "cropAspect": "original",
+  "maxLongEdge": null,
+  "targetMaxFileBytes": null,
+  "quality": 0.90,
+  "gainMapQuality": 0.90,
+  "avifCodec": "svtAV1",
+  "compatOptions": {
+    "writeLegacyAppleHDRGainMap": false,
+    "writeUltrahdrXMP": false,
+    "writeCustomRenderedHDR": false,
+    "closedLoopSDRCompensation": false
+  },
+  "hlgVideoOptions": null,
+  "platformAdvisory": "推荐经 AirDrop（原图）或 iCloud 照片同步至 iPhone；iOS 18–27 相册原生静态 HDR 无角标，观感与 iPhone 原相机直出一致。"
+}
