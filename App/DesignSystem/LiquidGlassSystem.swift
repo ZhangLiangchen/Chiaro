@@ -1,35 +1,52 @@
 import AppKit
+import Foundation
 import Metal
 import SwiftUI
 
 public enum LiquidGlassSystem {
-    public static let neutralCanvasHex: String = "#111214"
-    public static let neutralCanvasRed: Double = 0.067
-    public static let neutralCanvasGreen: Double = 0.071
-    public static let neutralCanvasBlue: Double = 0.078
+    public static let adaptiveCanvasStyleIdentifier: String = "adaptive-liquid-glass"
 
-    public static let neutralCanvasColor = Color(
-        .sRGB,
-        red: neutralCanvasRed,
-        green: neutralCanvasGreen,
-        blue: neutralCanvasBlue,
-        opacity: 1.0
-    )
+    /// Resolves `NSColor.windowBackgroundColor` under the given appearance and converts
+    /// sRGB channels to linear sRGB for `rgba16Float` `MTKView.clearColor`.
+    /// Uses a safe Light/Dark neutral fallback so Light Mode never flashes black.
+    public static func adaptiveCanvasClearColor(for appearance: NSAppearance?) -> MTLClearColor {
+        let resolvedAppearance = appearance ?? NSAppearance.currentDrawing()
+        let isDark = resolvedAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
 
-    public static let neutralCanvasNSColor = NSColor(
-        srgbRed: CGFloat(neutralCanvasRed),
-        green: CGFloat(neutralCanvasGreen),
-        blue: CGFloat(neutralCanvasBlue),
-        alpha: 1.0
-    )
+        var resolvedSRGB: NSColor?
+        resolvedAppearance.performAsCurrentDrawingAppearance {
+            resolvedSRGB = NSColor.windowBackgroundColor.usingColorSpace(.sRGB)
+        }
 
-    /// Linear sRGB equivalent of #111214 (`sRGB 17/255, 18/255, 20/255`) for `rgba16Float` MTKView clearColor.
-    public static let neutralCanvasClearColor = MTLClearColor(
-        red: 0.005605,
-        green: 0.006049,
-        blue: 0.006995,
-        alpha: 1.0
-    )
+        let srgbRed: Double
+        let srgbGreen: Double
+        let srgbBlue: Double
+        if let color = resolvedSRGB, color.alphaComponent >= 0.5 {
+            srgbRed = Double(color.redComponent)
+            srgbGreen = Double(color.greenComponent)
+            srgbBlue = Double(color.blueComponent)
+        } else {
+            let fallback: Double = isDark ? 0.12 : 0.95
+            srgbRed = fallback
+            srgbGreen = fallback
+            srgbBlue = fallback
+        }
+
+        return MTLClearColor(
+            red: sRGBToLinear(srgbRed),
+            green: sRGBToLinear(srgbGreen),
+            blue: sRGBToLinear(srgbBlue),
+            alpha: 1.0
+        )
+    }
+
+    private static func sRGBToLinear(_ channel: Double) -> Double {
+        let clamped = min(max(channel, 0.0), 1.0)
+        if clamped <= 0.04045 {
+            return clamped / 12.92
+        }
+        return pow((clamped + 0.055) / 1.055, 2.4)
+    }
 
     public static func isReduceTransparencyActive(_ envReduceTransparency: Bool) -> Bool {
         envReduceTransparency

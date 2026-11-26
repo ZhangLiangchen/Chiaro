@@ -436,29 +436,29 @@ extension ChiaroSerializedSuites {
             #expect(delta.denoiseOverride?.mode == .off)
         }
 
-        @Test("4. LiquidGlassSystem #111214 neutral canvas constants match linearized sRGB and ARW discovery rejects non-ARWs & fake .ARW dirs")
-        func testDesignSystemNeutralCanvasHexAndARWOnlyDiscovery() throws {
+        @Test("4. LiquidGlassSystem adaptive Liquid Glass canvas replaces #111214 and ARW discovery rejects non-ARWs & fake .ARW dirs")
+        func testDesignSystemAdaptiveLiquidGlassCanvasAndARWOnlyDiscovery() throws {
             let liquidGlassURL = tier5V11RepoRoot
                 .appendingPathComponent("App/DesignSystem/LiquidGlassSystem.swift")
             let sourceText = try String(contentsOf: liquidGlassURL, encoding: .utf8)
 
-            #expect(sourceText.contains("neutralCanvasHex: String = \"#111214\""))
-            #expect(sourceText.contains("neutralCanvasRed: Double = 0.067"))
-            #expect(sourceText.contains("neutralCanvasGreen: Double = 0.071"))
-            #expect(sourceText.contains("neutralCanvasBlue: Double = 0.078"))
-            #expect(sourceText.contains("red: 0.005605"))
-            #expect(sourceText.contains("green: 0.006049"))
-            #expect(sourceText.contains("blue: 0.006995"))
+            #expect(sourceText.contains("adaptiveCanvasStyleIdentifier: String = \"adaptive-liquid-glass\""))
+            #expect(sourceText.contains("adaptiveCanvasClearColor(for"))
+            #expect(!sourceText.contains("#111214"))
+            #expect(!sourceText.contains("neutralCanvasHex"))
+            #expect(!sourceText.contains("neutralCanvasClearColor"))
 
-            let srgb17 = 17.0 / 255.0
-            let srgb18 = 18.0 / 255.0
-            let srgb20 = 20.0 / 255.0
-            #expect(abs(srgb17 - 0.067) < 1e-3)
-            #expect(abs(srgb18 - 0.071) < 1e-3)
-            #expect(abs(srgb20 - 0.078) < 1e-3)
-            #expect(abs(sRGBToLinearV11(srgb17) - 0.005605) < 1e-4)
-            #expect(abs(sRGBToLinearV11(srgb18) - 0.006049) < 1e-4)
-            #expect(abs(sRGBToLinearV11(srgb20) - 0.006995) < 1e-4)
+            let previewCanvasURL = tier5V11RepoRoot
+                .appendingPathComponent("App/Preview/PreviewCanvasView.swift")
+            let previewCanvasText = try String(contentsOf: previewCanvasURL, encoding: .utf8)
+            #expect(previewCanvasText.contains(".chiaroGlassSurface(cornerRadius: 12)"))
+            #expect(previewCanvasText.contains(".background(.background)"))
+            #expect(!previewCanvasText.contains("neutralCanvasColor"))
+
+            let lightFallbackLinear = sRGBToLinearV11(0.95)
+            let darkFallbackLinear = sRGBToLinearV11(0.12)
+            #expect(lightFallbackLinear > 0.85 && lightFallbackLinear < 0.95)
+            #expect(darkFallbackLinear > 0.01 && darkFallbackLinear < 0.02)
 
             let tmpDir = try makeTier5V11TempDir(prefix: "tier5-v11-arw-discovery")
             defer { try? FileManager.default.removeItem(at: tmpDir) }

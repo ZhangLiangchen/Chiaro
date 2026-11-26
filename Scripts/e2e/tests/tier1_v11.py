@@ -150,8 +150,10 @@ def get_tests() -> List[TestCase]:
     def t1_v11_21(ctx: RunContext) -> None:
         app = _require_app(ctx)
         info = check_app_bundle_v11(ctx.cfg.tools, app)
-        assert info["ok"], f"Chiaro.app v1.1 bundle errors: {info['errors']}"
-        assert info["short_version"] == "1.1.0", f"Expected CFBundleShortVersionString 1.1.0, got {info['short_version']!r}"
+        assert info["ok"], f"Chiaro.app v1.1.1 bundle errors: {info['errors']}"
+        assert info["short_version"] == "1.1.1", f"Expected CFBundleShortVersionString 1.1.1, got {info['short_version']!r}"
+        assert info.get("icon_file") == "AppIcon", f"Expected CFBundleIconFile 'AppIcon', got {info.get('icon_file')!r}"
+        assert info.get("app_icon_icns"), "AppIcon.icns missing from Chiaro.app Contents/Resources"
         assert info["shaders_metal_files"], "Shaders.metal missing from Chiaro.app Resources"
         json_stems = {Path(p).stem for p in info["resource_json_files"]}
         missing_presets = [pid for pid in BUILTIN_PRESET_IDS if pid not in json_stems]
@@ -160,14 +162,14 @@ def get_tests() -> List[TestCase]:
         assert info["lensfun_license_files"], "LensfunDB/cc-by-sa-3.0.txt missing from Chiaro.app"
         assert info["noise_profile_files"], "NoiseProfiles/*.json missing from Chiaro.app"
         ctx.note(
-            f"Chiaro.app v1.1.0 verified: {len(info['lensfun_xml_files'])} Lensfun XMLs, "
-            f"{len(info['noise_profile_files'])} noise profiles, self-contained linkage clean"
+            f"Chiaro.app v1.1.1 verified: {len(info['lensfun_xml_files'])} Lensfun XMLs, "
+            f"{len(info['noise_profile_files'])} noise profiles, AppIcon.icns & self-contained linkage clean"
         )
 
     def t1_v11_22(ctx: RunContext) -> None:
         dist_dir = ctx.cfg.repo_root / "dist"
-        app_zip = dist_dir / "Chiaro-1.1.0-macos-arm64.zip"
-        cli_tar = dist_dir / "chiaro-cli-1.1.0-macos-arm64.tar.gz"
+        app_zip = dist_dir / "Chiaro-1.1.1-macos-arm64.zip"
+        cli_tar = dist_dir / "chiaro-cli-1.1.1-macos-arm64.tar.gz"
         sums = dist_dir / "SHA256SUMS.txt"
         for p in (app_zip, cli_tar, sums):
             assert p.is_file() and p.stat().st_size > 0, f"Missing release artifact: {p}"
@@ -179,7 +181,7 @@ def get_tests() -> List[TestCase]:
         with tarfile.open(cli_tar, "r:gz") as tf:
             tf.extractall(unpack_dir, filter="tar")
 
-        pkg_root = unpack_dir / "chiaro-cli-1.1.0-macos-arm64"
+        pkg_root = unpack_dir / "chiaro-cli-1.1.1-macos-arm64"
         reloc_cli = pkg_root / "bin" / "chiaro-cli"
         reloc_sym = pkg_root / "bin" / "chiaro"
         assert reloc_cli.is_file() and os.access(reloc_cli, os.X_OK), f"Missing unpacked CLI: {reloc_cli}"
@@ -749,7 +751,7 @@ def get_tests() -> List[TestCase]:
 
         canvas_scan = probe_neutral_canvas_invariant(ctx.cfg.tools, app_exe)
         assert canvas_scan["ok"], (
-            f"Neutral #111214 canvas invariant failed on Chiaro executable: {canvas_scan}"
+            f"Adaptive Liquid Glass canvas invariant failed on Chiaro executable: {canvas_scan}"
         )
 
         assert info["shaders_metal_files"], "Shaders.metal missing in Chiaro.app"
@@ -851,8 +853,8 @@ def get_tests() -> List[TestCase]:
         TestCase("T1-V11-19", 1, "F18", "Full 4-Layer Precedence (CLI > --delta-file > Sidecar > Preset)", t1_v11_19, "chiaro -p apple_heic --delta-file --clarity 75 --demosaic dcb + sidecar"),
         TestCase("T1-V11-20", 1, "F18", "NDJSON v1.1 Event Stream Completeness", t1_v11_20, "chiaro DSC02532.ARW --json-progress job_decoded fields"),
         TestCase("T1-V11-21", 1, "F13", "Chiaro.app v1.1 Bundle Resources & Dylib Isolation", t1_v11_21, "check_app_bundle_v11 Chiaro.app"),
-        TestCase("T1-V11-22", 1, "F13", "dist/ Release Archives & SHA256SUMS.txt Integrity", t1_v11_22, "shasum -c + unpack chiaro-cli-1.1.0-macos-arm64.tar.gz + export"),
-        TestCase("T1-V11-23", 1, "F19", "Packaged Chiaro.app v1.1 UI Architecture Symbols & #111214", t1_v11_23, "strings/nm Chiaro.app + Shaders.metal v1.1 kernels"),
+        TestCase("T1-V11-22", 1, "F13", "dist/ Release Archives & SHA256SUMS.txt Integrity", t1_v11_22, "shasum -c + unpack chiaro-cli-1.1.1-macos-arm64.tar.gz + export"),
+        TestCase("T1-V11-23", 1, "F19", "Packaged Chiaro.app v1.1.1 UI Architecture & Adaptive Liquid Glass Canvas", t1_v11_23, "strings/nm Chiaro.app + adaptive-liquid-glass + Shaders.metal v1.1 kernels"),
         TestCase("T1-V11-24", 1, "F19", "Chiaro.app Bilingual Launch Smoke (zh-Hans & en)", t1_v11_24, "Launch Chiaro 3s with -AppleLanguages (zh-Hans) & (en)"),
         TestCase("T1-V11-25", 1, "F19", "Chiaro.app Reduce Transparency Accessibility Launch Smoke", t1_v11_25, "Launch Chiaro 3s with -NSReduceTransparency YES"),
         TestCase("T1-V11-26", 1, "F20", "Sony .ARW Focus & Supported Cameras Table (README + Info.plist)", t1_v11_26, "README Supported Cameras + Info.plist .ARW + dir filter"),

@@ -287,6 +287,9 @@ def get_tests() -> List[TestCase]:
         app = _require_app(ctx)
         info = check_app_bundle_v11(ctx.cfg.tools, app)
         assert info["ok"], f"Chiaro.app bundle invalid: {info['errors']}"
+        assert info["short_version"] == "1.1.1", f"Expected Chiaro.app 1.1.1, got {info['short_version']!r}"
+        assert info.get("icon_file") == "AppIcon", f"Expected CFBundleIconFile 'AppIcon', got {info.get('icon_file')!r}"
+        assert info.get("app_icon_icns"), "AppIcon.icns missing from Chiaro.app Contents/Resources"
         app_exe = Path(info["executable"])
 
         sym_res = probe_binary_strings_and_symbols(
@@ -313,7 +316,7 @@ def get_tests() -> List[TestCase]:
         )
 
         canvas_res = probe_neutral_canvas_invariant(ctx.cfg.tools, app_exe)
-        assert canvas_res["ok"], f"Missing #111214 neutral canvas invariant: {canvas_res}"
+        assert canvas_res["ok"], f"Adaptive Liquid Glass canvas invariant failed: {canvas_res}"
 
         for kwargs in (
             {"apple_languages": "en"},
@@ -324,9 +327,9 @@ def get_tests() -> List[TestCase]:
             assert sm["ok"], f"Chiaro.app smoke launch failed ({kwargs}): {sm}"
 
         unpack_dir = ctx.test_out_dir("T4-V11-05", "cli_unpack")
-        with tarfile.open(dist_dir / "chiaro-cli-1.1.0-macos-arm64.tar.gz", "r:gz") as tf:
+        with tarfile.open(dist_dir / "chiaro-cli-1.1.1-macos-arm64.tar.gz", "r:gz") as tf:
             tf.extractall(unpack_dir, filter="tar")
-        reloc_cli = unpack_dir / "chiaro-cli-1.1.0-macos-arm64" / "bin" / "chiaro-cli"
+        reloc_cli = unpack_dir / "chiaro-cli-1.1.1-macos-arm64" / "bin" / "chiaro-cli"
         rep = check_gpl3_compatible_linkage(ctx.cfg.tools, reloc_cli, check_symbols=True, require_self_contained=True)
         assert rep["clean"], f"Relocated CLI linkage violation: {rep}"
 
@@ -379,7 +382,7 @@ def get_tests() -> List[TestCase]:
         TestCase("T4-V11-02", 4, "Scenario", "High-ISO Night Quality Workflow (DSC02533 & DSC02543)", t4_v11_02, "lmmse+denoise+sigmoid+clarity+sharpness vs baseline off"),
         TestCase("T4-V11-03", 4, "Scenario", "Mixed Sidecar Directory Resume Workflow", t4_v11_03, "4 copied ARWs + v2/v3 sidecars + --delta-file + tri_format"),
         TestCase("T4-V11-04", 4, "Scenario", "Lensfun Fallback + Custom User XML Workflow (Offline Sandbox)", t4_v11_04, "sandbox-exec empty HOME vs custom XML HOME"),
-        TestCase("T4-V11-05", 4, "Scenario", "Full 1.1.0 Release Artifact & Packaged Chiaro.app Acceptance", t4_v11_05, "verify_licenses.sh --require-binaries + dist + Chiaro.app smoke"),
+        TestCase("T4-V11-05", 4, "Scenario", "Full 1.1.1 Release Artifact & Packaged Chiaro.app Acceptance", t4_v11_05, "verify_licenses.sh --require-binaries + dist + Chiaro.app smoke"),
         TestCase("T4-V11-06", 4, "Scenario", "Social Platform v1.1 Quality Export (Xiaohongshu + Douyin HLG MP4)", t4_v11_06, "3 ARWs lmmse+denoise+embedded+sigmoid -> xhs_jpg & douyin_hlg_mp4"),
     ])
 

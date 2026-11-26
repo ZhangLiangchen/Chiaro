@@ -36,7 +36,7 @@ Chiaro 旨在打造一款**完全开源、原生于 Apple Silicon（Swift 6 + Me
 |---|---|---|
 | **普通索尼摄影爱好者**（想“拖入 `.ARW` → 选平台 → 轻调两下 → 导出真 HDR”） | 右侧栏一次性堆砌 25+ 专业参数（`Midtone Anchor P`、`Opposed Inpaint`、`Gain Map Gamma` 等），上手门槛高，不知道每个滑块干什么用。 | ① 默认进入 **「预设模式（Preset Mode）」**：可视化平台预设卡片 + **5 个直觉滑块** + 自动镜头校正开关 + 画幅裁剪 + 一键导出；② 默认展开一行通俗短说明，点 `?` 浮卡查看「向左拉 / 向右拉效果」。 |
 | **专业索尼玩家 / A7C2 画质控**（对标 DxO PhotoLab） | ① 缺少镜头畸变/暗角/紫边自动校正（尤其是新款 E 口镜头如腾龙 25–200mm A075）；② 仅基础去马赛克，ISO 6400–12800 夜景或细密纹理不够锐利纯净；③ 关闭 App 后单图微调不随照片目录持久化。 | ① 引入 **LibRaw AMaZE / LMMSE / DCB** 高精度去马赛克；② 引入 **双开源自动光学引擎（`.ARW` 内嵌工厂光学曲线 + Lensfun 离线开源数据库，GPU 单 Pass 线性采样）**，新款 E 口镜头零手动调试开箱即准；③ **`.chiaro.json` 非破坏 Sidecar** 随图持久化；④ **「专业模式（Pro Mode）」** 全量参数控制 + 中性暗房画布。 |
-| **macOS 现代桌面审美用户 & 国际开源用户** | V1.0 UI 为基础表单风格，缺少现代 macOS 液态玻璃层次感；UI 与参数说明仅简体中文。 | 采用 **Apple Liquid Glass 液态玻璃设计体系**（悬浮控件通透折射 + 主画布严守暗房中性纯暗灰零色偏），并实现 **简体中文 + 英文全双语**。 |
+| **macOS 现代桌面审美用户 & 国际开源用户** | V1.0 UI 为基础表单风格，缺少现代 macOS 液态玻璃层次感；UI 与参数说明仅简体中文。 | 采用 **Apple Liquid Glass 液态玻璃设计体系**（悬浮控件与自适应液态玻璃画布 `adaptive-liquid-glass` 无缝跟随系统浅色/深色外观，同时严格保证 EDR 图像像素上方零有色折射干扰），并实现 **简体中文 + 英文全双语**。 |
 
 ---
 
@@ -166,7 +166,7 @@ Chiaro 旨在打造一款**完全开源、原生于 Apple Silicon（Swift 6 + Me
 ### FR-18：Apple Liquid Glass 液态玻璃 UI 设计体系与中英双语
 1. **视觉层次划分（暗房色彩准确性铁律）**：
    - **悬浮控制层（Liquid Glass Layer）**：顶部工具栏、模式切换胶囊、左侧预设卡片与队列浮层、右侧参数分组卡片、画布上方悬浮 HUD（EDR 状态、热力图图例、Gain Map 信息胶囊、加载指示器）、`?` 参数说明浮卡、导出与合规报告弹窗——在 **macOS 26.0+** 使用原生 Apple Liquid Glass（`.glassEffect`、`GlassEffectContainer`、`.buttonStyle(.glass)` / `.buttonStyle(.glassProminent)`），在 **macOS 15** 优雅降级为 `.ultraThinMaterial` + `0.5pt` 高光描边 + 轻阴影。
-   - **主预览画布层（Color-Critical Neutral Layer）**：HDR/EDR 图像预览视口外围背景**严格锁定中性纯暗灰（`#111214`）**，**严禁**在图像背景或图像上方叠加有色折射玻璃，防止色彩污染或桌面壁纸透底干扰 10-bit Display P3 白平衡与高光判断。
+   - **主预览画布层（v1.1.1 自适应液态玻璃画布 `adaptive-liquid-glass`）**：预览工作区无缝跟随系统 Light/Dark Mode（与左右侧栏保持一致），预览视口采用统一的 `.chiaroGlassSurface(cornerRadius: 12)` 液态玻璃卡片，Metal `MTKView` 清屏色随系统外观动态映射；同时**严禁**在 EDR 图像像素上方叠加任何有色折射或玻璃蒙版，防止色彩污染干扰 10-bit Display P3 白平衡与高光判断。
    - **无障碍适配**：自动响应系统「降低透明度（Reduce Transparency）」与「增加对比度（Increase Contrast）」偏好设置。
 2. **中英双语国际化**：
    - 全量 UI 文案、预设描述、发布防坑指引与 `ParameterDocumentationRegistry` 均支持 **简体中文（`zh-Hans`）** 与 **英文（`en`）**；
@@ -210,5 +210,5 @@ Chiaro 旨在打造一款**完全开源、原生于 Apple Silicon（Swift 6 + Me
    - 预设模式 ↔ 专业模式无损往返切换单测通过（含高级参数保留与「含 N 项专业微调」检测）；
    - `ParameterDocumentationTests` 强制断言 `ParameterID.allCases` 100% 拥有非空 `zh-Hans` + `en` 完整 6 字段文档；
    - 中英双语切换无缺失本地化 Key。
-5. **液态玻璃 UI & 真机兼容**：`Chiaro.app` 在 macOS 27.2 上编译签名并 3 秒启动冒烟通过，无崩溃日志；主画布背景锁定中性暗灰（`#111214`）；`@available(macOS 26.0, *)` 与 macOS 15 降级路径均编译通过且支持减少透明度无障碍模式。
+5. **液态玻璃 UI & 真机兼容**：`Chiaro.app` 在 macOS 27.2 上编译签名并 3 秒启动冒烟通过，无崩溃日志；主画布采用自适应液态玻璃卡片（`adaptive-liquid-glass`，`.chiaroGlassSurface(cornerRadius: 12)` 无缝跟随系统浅色/深色模式且 EDR 图像像素上方零有色折射）；`@available(macOS 26.0, *)` 与 macOS 15 降级路径均编译通过且支持减少透明度无障碍模式。
 6. **回归零退化**：v1.0 全部 95 项既有单元测试 + 164 项 E2E 合规测试（含 `ImageIOProbe`、`avifdec`、`ultrahdr_app`、`exiftool`、`ffprobe`）与新增 v1.1 单测/E2E 全绿通过。

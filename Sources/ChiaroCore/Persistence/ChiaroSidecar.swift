@@ -40,7 +40,7 @@ public struct ChiaroSidecar: Sendable, Codable, Equatable, Hashable {
 
     public init(
         schemaVersion: Int = ChiaroSidecar.currentSchemaVersion,
-        appVersion: String = "1.1.0",
+        appVersion: String = "1.1.1",
         updatedAt: Date = ChiaroSidecar.currentTimestamp(),
         presetID: String? = nil,
         decodeBackend: RAWBackend? = nil,
@@ -83,7 +83,7 @@ public struct ChiaroSidecar: Sendable, Codable, Equatable, Hashable {
             throw ChiaroSidecarError.unsupportedSchemaVersion(schemaVersion)
         }
         self.schemaVersion = schemaVersion
-        self.appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.1.0"
+        self.appVersion = try c.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.1.1"
 
         if c.contains(.updatedAt) {
             if let timestampString = try? c.decode(String.self, forKey: .updatedAt) {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CONFIG="release"
-APP_VERSION="${CHIARO_VERSION:-1.1.0}"
+APP_VERSION="${CHIARO_VERSION:-1.1.1}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug) CONFIG="debug"; shift ;;
@@ -244,7 +244,7 @@ cat <<PLIST > "$STAGING_APP/Contents/Info.plist"
 	<key>CFBundleShortVersionString</key>
 	<string>${APP_VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>

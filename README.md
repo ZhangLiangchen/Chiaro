@@ -37,7 +37,7 @@ Chiaro (*Italian for "light, bright, clear" — from Chiaroscuro*) develops came
   - **10-bit HLG MP4 (`.mp4`)**: Native `AVAssetWriter` + VideoToolbox 10-bit HEVC Main10 `BT.2020 HLG` (`1080×1920` / `1080×1440`, 30fps, 12–16 Mbps).
 - **Non-Destructive Sidecars, Dual-Mode UI & Liquid Glass**
   - Atomic `.chiaro.json` (`schemaVersion = 2`) sidecars shared between `Chiaro.app` and `chiaro-cli`.
-  - Lossless **Preset Mode ⇄ Pro Mode** (`⌘⇧P`) with 100% bilingual (`zh-Hans` / `en`) parameter documentation (`?` popovers & inline summaries) and native macOS 26+ **Apple Liquid Glass** (macOS 15 `.ultraThinMaterial` fallback) with `#111214` neutral darkroom canvas.
+  - Lossless **Preset Mode ⇄ Pro Mode** (`⌘⇧P`) with 100% bilingual (`zh-Hans` / `en`) parameter documentation (`?` popovers & inline summaries) and native macOS 26+ **Apple Liquid Glass** (macOS 15 `.ultraThinMaterial` fallback) with an adaptive Liquid Glass preview canvas (`adaptive-liquid-glass`, seamlessly following system Light/Dark mode via a unified `.chiaroGlassSurface(cornerRadius: 12)` card while keeping zero tinted refraction over EDR photo pixels).
 - **GPL-3.0-or-later License & SBOM Compliance**
   - Verified by [`Scripts/verify_licenses.sh`](Scripts/verify_licenses.sh) across sources, static archives, symbols (`nm`), and recursive Mach-O linkage (`otool -L`).
 
@@ -70,8 +70,8 @@ Chiaro's core linear pipeline (`ChiaroCore`), Lensfun integration, and `.chiaro.
 ### Option 1: Download Prebuilt Release (Apple Silicon, macOS 15+)
 
 Download from [**GitHub Releases**](https://github.com/ZhangLiangchen/Chiaro/releases):
-- **`Chiaro-1.1.0-macos-arm64.zip`**: Standalone `Chiaro.app` with bundled Lensfun DB, noise profiles, and dynamic AV1 frameworks (no Homebrew required).
-- **`chiaro-cli-1.1.0-macos-arm64.tar.gz`**: Standalone `chiaro` CLI + resource bundle + bundled AV1 dylibs.
+- **`Chiaro-1.1.1-macos-arm64.zip`**: Standalone `Chiaro.app` with bundled Lensfun DB, noise profiles, and dynamic AV1 frameworks (no Homebrew required).
+- **`chiaro-cli-1.1.1-macos-arm64.tar.gz`**: Standalone `chiaro` CLI + resource bundle + bundled AV1 dylibs.
 
 > **Note (ad-hoc signed open-source build):** If macOS Gatekeeper warns on first launch, run:
 > ```bash
@@ -129,7 +129,7 @@ bash Vendor/build_deps.sh
 swift build -c release --product chiaro-cli
 
 # 3. Build standalone signed Chiaro.app (bundles dynamic AV1 dylibs inside Contents/Frameworks)
-bash Scripts/build_app.sh --version 1.1.0
+bash Scripts/build_app.sh --version 1.1.1
 
 # 4. Run unit tests (pass CHIARO_SAMPLE_DIR=/path/to/arw/dir to include real Sony ARW tests)
 SVT_LOG=0 swift test

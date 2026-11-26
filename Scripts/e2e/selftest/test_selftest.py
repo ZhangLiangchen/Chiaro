@@ -521,29 +521,56 @@ def run_selftest(cfg: E2EConfig, probes: SwiftProbes) -> Tuple[bool, List[Tuple[
         canvas_dir = st_dir / "canvas_probe"
         canvas_dir.mkdir(parents=True, exist_ok=True)
 
-        def _compile_canvas(name: str, r_expr: str, g_expr: str, b_expr: str) -> Path:
+        def _compile_canvas(
+            name: str,
+            *,
+            style_id: str,
+            include_locked_dark: bool = False,
+        ) -> Path:
             src = canvas_dir / f"{name}.swift"
             exe = canvas_dir / name
+            locked_member = (
+                '    public static let lockedDarkHex: String = "#111214"\n'
+                if include_locked_dark
+                else ""
+            )
+            locked_modifier = (
+                '\n                .accessibilityIdentifier("chiaro.legacy.\\(LiquidGlassSystem.lockedDarkHex)")'
+                if include_locked_dark
+                else ""
+            )
             src.write_text(
                 f"""import AppKit
 import Metal
 import MetalKit
 import SwiftUI
 
+public enum LiquidGlassSystem {{
+    public static let adaptiveCanvasStyleIdentifier: String = "{style_id}"
+{locked_member}    @MainActor
+    public static func adaptiveCanvasClearColor(for appearance: NSAppearance?) -> MTLClearColor {{
+        let isDark = appearance?.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let v = isDark ? 0.015 : 0.90
+        return MTLClearColor(red: v, green: v, blue: v, alpha: 1.0)
+    }}
+}}
+
 struct PreviewCanvasView: View {{
     var body: some View {{
         Color.clear
-            .background(Color(nsColor: NSColor(srgbRed: {r_expr}, green: {g_expr}, blue: {b_expr}, alpha: 1.0)))
+            .background(.background)
     }}
 }}
 
 struct EDRMetalPreviewView: NSViewRepresentable {{
     func makeNSView(context: Context) -> MTKView {{
         let view = MTKView(frame: .zero, device: nil)
-        view.clearColor = MTLClearColor(red: {r_expr}, green: {g_expr}, blue: {b_expr}, alpha: 1.0)
+        view.clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: view.effectiveAppearance)
         return view
     }}
-    func updateNSView(_ nsView: MTKView, context: Context) {{}}
+    func updateNSView(_ nsView: MTKView, context: Context) {{
+        nsView.clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: nsView.effectiveAppearance)
+    }}
 }}
 
 @main
@@ -552,7 +579,8 @@ struct CanvasMain: App {{
         WindowGroup {{
             VStack {{
                 PreviewCanvasView()
-                EDRMetalPreviewView()
+                    .accessibilityIdentifier("chiaro.canvas.\\(LiquidGlassSystem.adaptiveCanvasStyleIdentifier)")
+                EDRMetalPreviewView(){locked_modifier}
             }}
         }}
     }}
@@ -566,17 +594,17 @@ struct CanvasMain: App {{
             )
             return exe
 
-        ok_approx = _compile_canvas("canvas_ok_approx", "0.067", "0.071", "0.078")
-        res_approx = probe_neutral_canvas_invariant(cfg.tools, ok_approx)
-        assert res_approx["ok"], f"Expected #111214 (0.067/0.071/0.078) Release binary to pass: {res_approx}"
+        ok_adaptive = _compile_canvas("canvas_ok_adaptive", style_id="adaptive-liquid-glass")
+        res_ok = probe_neutral_canvas_invariant(cfg.tools, ok_adaptive)
+        assert res_ok["ok"], f"Expected adaptive Liquid Glass canvas Release binary to pass: {res_ok}"
 
-        ok_exact = _compile_canvas("canvas_ok_exact", "17.0/255.0", "18.0/255.0", "20.0/255.0")
-        res_exact = probe_neutral_canvas_invariant(cfg.tools, ok_exact)
-        assert res_exact["ok"], f"Expected #111214 (17/255, 18/255, 20/255) Release binary to pass: {res_exact}"
+        bad_missing = _compile_canvas("canvas_bad_missing_adaptive", style_id="legacy-static")
+        res_missing = probe_neutral_canvas_invariant(cfg.tools, bad_missing)
+        assert not res_missing["ok"], f"Expected binary lacking adaptive-liquid-glass marker to fail: {res_missing}"
 
-        bad_bin = _compile_canvas("canvas_bad", "0.05", "0.05", "0.06")
-        res_bad = probe_neutral_canvas_invariant(cfg.tools, bad_bin)
-        assert not res_bad["ok"], f"Expected wrong canvas color (0.05/0.05/0.06) Release binary to fail: {res_bad}"
+        bad_locked = _compile_canvas("canvas_bad_locked_dark", style_id="adaptive-liquid-glass", include_locked_dark=True)
+        res_locked = probe_neutral_canvas_invariant(cfg.tools, bad_locked)
+        assert not res_locked["ok"], f"Expected binary still locking #111214 dark canvas to fail: {res_locked}"
 
     checks.extend([
         ("ST-01 Positive HEIC (10-bit P3 + ISO tmap + EXIF)", st_pos_heic),
@@ -600,7 +628,7 @@ struct CanvasMain: App {{
         ("ST-19 v1.1 Decode (sips/PIL) + Diff + Noise + Acutance + HDR Float32 Probe", st_v11_pixel_iq_and_hdr_probes),
         ("ST-20 v1.1 Highlight Magenta Fraction Probe", st_v11_magenta_highlight_probe),
         ("ST-21 v1.1 verify_licenses.sh SBOM Table Probe", st_v11_sbom_probe),
-        ("ST-22 v1.1 #111214 Neutral Canvas Swift 6 Release Binary Probe", st_v11_neutral_canvas_binary_probe),
+        ("ST-22 v1.1.1 Adaptive Liquid Glass Canvas Swift 6 Release Binary Probe", st_v11_neutral_canvas_binary_probe),
     ])
 
     results: List[Tuple[str, bool, str]] = []

@@ -407,13 +407,13 @@ def get_tests() -> List[TestCase]:
                 assert_hlg_mp4_compliant(ctx, out / f"{stem}_HDR.mp4", allowed_sizes=((w, h),))
 
     def t2_v11_22(ctx: RunContext) -> None:
-        cli_tar = ctx.cfg.repo_root / "dist" / "chiaro-cli-1.1.0-macos-arm64.tar.gz"
+        cli_tar = ctx.cfg.repo_root / "dist" / "chiaro-cli-1.1.1-macos-arm64.tar.gz"
         assert cli_tar.is_file(), f"Missing {cli_tar}"
         reloc_root = ctx.test_out_dir("T2-V11-22", "reloc_cli")
         with tarfile.open(cli_tar, "r:gz") as tf:
             tf.extractall(reloc_root, filter="tar")
 
-        reloc_cli = reloc_root / "chiaro-cli-1.1.0-macos-arm64" / "bin" / "chiaro-cli"
+        reloc_cli = reloc_root / "chiaro-cli-1.1.1-macos-arm64" / "bin" / "chiaro-cli"
         out = ctx.test_out_dir("T2-V11-22", "out")
         sb = ctx.cfg.tools.sandbox_exec or "/usr/bin/sandbox-exec"
         res = ctx.run_cmd(

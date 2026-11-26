@@ -1,11 +1,18 @@
+import AppKit
 import ChiaroAppCore
 import ChiaroCore
 import SwiftUI
 
 struct DualZoneHistogramView: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     let bins: [UInt32]
     let displayHeadroom: LinearHeadroom
     var language: ResolvedLanguage = .zhHans
+
+    private var zeroEVColor: Color {
+        colorScheme == .dark ? Color.cyan.opacity(0.85) : Color.blue.opacity(0.78)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -26,11 +33,11 @@ struct DualZoneHistogramView: View {
                 let midX = size.width * 0.5
                 context.fill(
                     Path(CGRect(x: 0, y: 0, width: midX, height: size.height)),
-                    with: .color(Color.white.opacity(0.03))
+                    with: .color(Color.primary.opacity(colorScheme == .dark ? 0.04 : 0.035))
                 )
                 context.fill(
                     Path(CGRect(x: midX, y: 0, width: size.width - midX, height: size.height)),
-                    with: .color(Color.orange.opacity(0.08))
+                    with: .color(Color.orange.opacity(colorScheme == .dark ? 0.10 : 0.12))
                 )
 
                 let safeBins = bins.count == 256 ? bins : Array(repeating: UInt32(0), count: 256)
@@ -63,30 +70,37 @@ struct DualZoneHistogramView: View {
                 hdrPath.addLine(to: CGPoint(x: size.width, y: size.height))
                 hdrPath.closeSubpath()
 
-                context.fill(sdrPath, with: .color(Color.white.opacity(0.75)))
+                let sdrBarColor = colorScheme == .dark
+                    ? Color.white.opacity(0.75)
+                    : Color.primary.opacity(0.65)
+                context.fill(sdrPath, with: .color(sdrBarColor))
                 context.fill(hdrPath, with: .color(Color.orange.opacity(0.9)))
 
                 var zeroEVLine = Path()
                 zeroEVLine.move(to: CGPoint(x: midX, y: 0))
                 zeroEVLine.addLine(to: CGPoint(x: midX, y: size.height))
-                context.stroke(zeroEVLine, with: .color(.cyan.opacity(0.85)), lineWidth: 1.5)
+                context.stroke(zeroEVLine, with: .color(zeroEVColor), lineWidth: 1.5)
 
                 let simEV = min(max(displayHeadroom.toStops().log2Value, 0.0), 4.0)
                 let simX = midX + CGFloat(simEV / 4.0) * (size.width - midX)
                 var simLine = Path()
                 simLine.move(to: CGPoint(x: simX, y: 0))
                 simLine.addLine(to: CGPoint(x: simX, y: size.height))
+                let simLineColor = colorScheme == .dark
+                    ? Color.yellow.opacity(0.85)
+                    : Color.orange.opacity(0.9)
                 context.stroke(
                     simLine,
-                    with: .color(.yellow.opacity(0.8)),
+                    with: .color(simLineColor),
                     style: StrokeStyle(lineWidth: 1, dash: [3, 3])
                 )
             }
             .frame(height: 68)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.55))
             .clipShape(RoundedRectangle(cornerRadius: 6))
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(Color.primary.opacity(0.14), lineWidth: 1)
             )
 
             HStack {
@@ -95,7 +109,7 @@ struct DualZoneHistogramView: View {
                 Text("-3 EV")
                 Spacer()
                 Text(ChiaroStrings.histogramZeroEV(language))
-                    .foregroundStyle(.cyan)
+                    .foregroundStyle(zeroEVColor)
                 Spacer()
                 Text("+2 EV")
                 Spacer()

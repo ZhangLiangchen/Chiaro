@@ -42,7 +42,7 @@ flowchart TD
     subgraph UI["Chiaro.app (macOS 26+ Native Liquid Glass / macOS 15 Fallback)"]
         MODE["预设模式 ⇄ 专业模式<br/>共享 DevelopParameters 无损切换"]
         DOCS["ParameterDocumentationRegistry<br/>100% 控件中英双语说明 + ? 液态玻璃浮卡"]
-        EDR["120Hz EDR MTKView<br/>中性暗房背景 #111214 (零色偏折射)"]
+        EDR["120Hz EDR MTKView<br/>自适应液态玻璃画布 adaptive-liquid-glass (像素零有色折射)"]
     end
 
     RAW --> LR & CI
@@ -165,7 +165,7 @@ flowchart TD
    ```json
    {
      "schemaVersion": 2,
-     "appVersion": "1.1.0",
+     "appVersion": "1.1.1",
      "updatedAt": "2026-11-26T01:45:00Z",
      "presetID": "apple_heic",
      "decodeBackend": "libraw",
@@ -244,7 +244,7 @@ flowchart TD
 
 ---
 
-## ADR-016：Apple Liquid Glass 液态玻璃设计体系与暗房中性画布铁律
+## ADR-016：Apple Liquid Glass 液态玻璃设计体系与自适应画布规范（v1.1.1 修订）
 
 ### 架构决策
 1. **统一封装适配层（`App/DesignSystem/LiquidGlassSystem.swift`）**：
@@ -252,13 +252,14 @@ flowchart TD
    - 封装可复用的 SwiftUI 修饰器与容器：
      - `ChiaroGlassContainer`：在 `if #available(macOS 26.0, *)` 路由至原生 `GlassEffectContainer`，在 macOS 15 透传布局容器；
      - `.chiaroGlassSurface(shape:tint:interactive:)`：
-       - 若 `accessibilityReduceTransparency == true`：降级为高对比度实心暗面（`Color(nsColor: .windowBackgroundColor)` + 清晰描边）；
+       - 若 `accessibilityReduceTransparency == true`：降级为高对比度实心底面（`Color(nsColor: .windowBackgroundColor)` + 清晰描边）；
        - 否则 `if #available(macOS 26.0, *)`：调用 macOS 26+ 原生 `.glassEffect(.regular.tint(...).interactive(...), in: shape)`；
        - macOS 15 降级：`.background(.ultraThinMaterial, in: shape)` + `0.5pt` 顶部微亮高光渐变描边 + 轻阴影。
      - `.chiaroGlassButtonStyle(prominent: Bool)`：macOS 26+ 映射到 `.buttonStyle(.glassProminent)` / `.buttonStyle(.glass)`，macOS 15 映射到 `.borderedProminent` / `.bordered`。
-2. **暗房色彩准确性铁律（Color-Critical Neutral Invariant）**：
-   - **允许使用 Liquid Glass 的区域**：窗口工具栏、模式切换胶囊、左侧预设卡片与队列浮层、右侧参数分组浮卡、`?` 参数解释 Popover、预览画布角落的轻量 HUD 胶囊（EDR 状态、热力图图例、Gain Map 信息、渲染进度）、导出与合规弹窗。
-   - **严禁使用有色折射玻璃的区域**：`PreviewCanvasView` 的 `EDRMetalPreviewView` 渲染视口及其四周留白画布底板**强制锁定为校准中性暗炭灰 `#111214`（sRGB `0.067, 0.071, 0.078`）**，防止桌面彩色壁纸透底或玻璃折射色散污染专业用户的 HDR 色彩与白平衡观感。
+2. **自适应液态玻璃画布与 EDR 像素无污染铁律（v1.1.1 `adaptive-liquid-glass`）**：
+   - **统一自适应外观与液态玻璃视口卡片**：v1.1.1 移除早期硬编码深灰画布底板，`PreviewCanvasView` 根容器无缝跟随系统 Light/Dark Mode（与左右侧栏保持一致），预览视口采用统一的 `.chiaroGlassSurface(cornerRadius: 12)` 液态玻璃卡片（无障碍标识 `chiaro.canvas.adaptive-liquid-glass`），`EDRMetalPreviewView` 根据 `effectiveAppearance` 动态解析 `MTLClearColor`，杜绝浅色模式下的黑闪与深色块割裂感。
+   - **允许使用 Liquid Glass 的区域**：窗口工具栏、模式切换胶囊、左侧预设卡片与队列浮层、右侧参数分组浮卡、预览视口外框卡片（`.chiaroGlassSurface(cornerRadius: 12)`）、`?` 参数解释 Popover、预览画布角落的轻量 HUD 胶囊（EDR 状态、热力图图例、Gain Map 信息、渲染进度）、导出与合规弹窗。
+   - **严禁覆盖 EDR 图像像素**：所有 Liquid Glass 材质与悬浮 HUD 仅作用于容器外框与角落浮层，**严禁**在 `EDRMetalPreviewView` 图像像素上方叠加任何有色折射玻璃或偏色蒙版，确保 10-bit Display P3 照片像素保持纯粹无污染的 HDR 色彩与白平衡观感。
 
 ---
 
@@ -375,7 +376,7 @@ Chiaro/
 │   │   ├── LiquidGlassSystem.swift        # [新增] macOS 26+ 原生 Liquid Glass / macOS 15 降级 + 无障碍适配
 │   │   └── DocumentedControls.swift       # [新增] DocumentedSlider / Picker / Toggle + ? 液态玻璃详卡 Popover
 │   ├── ChiaroApp.swift                    # [更新] 顶栏 Liquid Glass 预设/专业模式切换、语言切换、参数简介开关
-│   ├── Preview/                           # [更新] 中性暗房画布 #111214 + Liquid Glass 悬浮 HUD
+│   ├── Preview/                           # [更新] 自适应液态玻璃画布 (adaptive-liquid-glass) + Liquid Glass 悬浮 HUD
 │   └── Views/
 │       ├── PresetModeInspectorView.swift  # [新增] 面向普通用户的预设卡片 + 5 滑块极简暗房视图
 │       ├── InspectorView.swift            # [更新] 专业模式 5 分组（含解码与双开源光学模块）+ 100% 参数说明接入
@@ -383,7 +384,7 @@ Chiaro/
 ├── Scripts/
 │   ├── verify_licenses.sh                 # [更新] GPL-3.0 兼容性 & SBOM 审计
 │   ├── build_app.sh                       # [更新] 打包离线 LensfunDB + 独立动态库
-│   └── package_release.sh                 # [更新] v1.1.0 独立 Release 打包
+│   └── package_release.sh                 # [更新] v1.1.1 独立 Release 打包
 └── Tests/ChiaroCoreTests/
     ├── DemosaicAndOpticsTests.swift       # [新增] A7C2 AMaZE/LMMSE/DCB 实测 + Embedded ARW (16/11节点) & Lensfun GPU 无裁切单测
     ├── SidecarAndCLITests.swift           # [新增] .chiaro.json v2 往返/前向兼容/CLI 优先级单测

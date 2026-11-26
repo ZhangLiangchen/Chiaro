@@ -4,6 +4,7 @@ import SwiftUI
 
 struct PreviewCanvasView: View {
     @Bindable var viewModel: AppViewModel
+    @Environment(\.colorScheme) private var colorScheme
 
     private var lang: ResolvedLanguage {
         viewModel.resolvedLanguage
@@ -19,17 +20,13 @@ struct PreviewCanvasView: View {
 
             previewViewport
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(LiquidGlassSystem.neutralCanvasColor)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .chiaroGlassSurface(cornerRadius: 12)
 
             bottomMetadataAndHistogramBar
         }
         .padding(12)
-        .background(LiquidGlassSystem.neutralCanvasColor)
+        .background(.background)
     }
 
     private var edrStatusAndControlsBar: some View {
@@ -37,7 +34,7 @@ struct PreviewCanvasView: View {
             HStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(viewModel.isSDRExternalMonitor ? Color.yellow : Color.green)
+                        .fill(viewModel.isSDRExternalMonitor ? (colorScheme == .dark ? Color.yellow : Color.orange) : Color.green)
                         .frame(width: 8, height: 8)
                     Text(ChiaroStrings.screenEDRBadge(
                         edr: viewModel.screenMaxEDR,
@@ -130,7 +127,7 @@ struct PreviewCanvasView: View {
     private var sdrMonitorBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.yellow)
+                .foregroundStyle(colorScheme == .dark ? Color.yellow : Color.orange)
             Text(ChiaroStrings.sdrMonitorBannerText(lang))
                 .font(.caption)
                 .foregroundStyle(.primary)
@@ -144,7 +141,10 @@ struct PreviewCanvasView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .chiaroGlassSurface(cornerRadius: 8, tint: Color.yellow.opacity(0.25))
+        .chiaroGlassSurface(
+            cornerRadius: 8,
+            tint: colorScheme == .dark ? Color.yellow.opacity(0.22) : Color.orange.opacity(0.16)
+        )
     }
 
     @ViewBuilder
@@ -161,8 +161,6 @@ struct PreviewCanvasView: View {
             }()
 
             ZStack {
-                LiquidGlassSystem.neutralCanvasColor
-
                 // Keep a single EDRMetalPreviewView instance mounted across empty/loading/rendered states
                 // so first-frame load never tears down and recreates the underlying MTKView.
                 EDRMetalPreviewView(
@@ -179,6 +177,8 @@ struct PreviewCanvasView: View {
                     }
                 )
                 .frame(width: max(1, fitted.width), height: max(1, fitted.height))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .shadow(color: Color.black.opacity(frame == nil ? 0.0 : 0.12), radius: 10, y: 3)
                 .overlay(alignment: .topLeading) {
                     if frame != nil, viewModel.previewMode == .splitScreenSwipe {
                         splitOverlay(in: fitted.size)
@@ -248,7 +248,7 @@ struct PreviewCanvasView: View {
                             .foregroundStyle(.secondary)
                         Text(ChiaroStrings.emptyCanvasTitle(lang))
                             .font(.headline)
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.primary)
                         Text(ChiaroStrings.emptyCanvasSubtitle(lang))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -291,6 +291,7 @@ struct PreviewCanvasView: View {
             HStack {
                 Text(ChiaroStrings.splitSDRBadge(lang))
                     .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.primary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .chiaroGlassSurface(in: Capsule())
@@ -299,7 +300,11 @@ struct PreviewCanvasView: View {
                     .font(.caption2.weight(.semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(.orange.opacity(0.85), in: Capsule())
+                    .background(.orange.opacity(0.90), in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.black.opacity(0.12), lineWidth: 0.5)
+                    )
                     .foregroundStyle(.black)
             }
             .padding(10)
@@ -316,7 +321,11 @@ struct PreviewCanvasView: View {
                 .padding(.horizontal, 6)
                 .padding(.vertical, 6)
                 .background(.white, in: Capsule())
-                .shadow(radius: 3)
+                .overlay(
+                    Capsule()
+                        .stroke(Color.black.opacity(0.18), lineWidth: 0.75)
+                )
+                .shadow(color: Color.black.opacity(0.28), radius: 4, y: 1)
                 Spacer()
             }
             .frame(width: 34, height: size.height)

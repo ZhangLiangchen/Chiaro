@@ -1080,7 +1080,7 @@ public final class AppViewModel {
             let expectedToken = coordinator.currentWriteToken(for: url)
             let sidecar = ChiaroSidecar(
                 schemaVersion: ChiaroSidecar.currentSchemaVersion,
-                appVersion: "1.1.0",
+                appVersion: "1.1.1",
                 updatedAt: ChiaroSidecar.currentTimestamp(),
                 presetID: self.activePreset.id,
                 decodeBackend: delta?.decodeBackendOverride,

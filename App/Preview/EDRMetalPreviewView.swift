@@ -13,8 +13,15 @@ final class EDRMTKView: MTKView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: effectiveAppearance)
         installObservers()
         reportScreenEDR()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: effectiveAppearance)
+        setNeedsDisplay(bounds)
     }
 
     private func installObservers() {
@@ -80,7 +87,7 @@ struct EDRMetalPreviewView: NSViewRepresentable {
         view.preferredFramesPerSecond = 120
         view.enableSetNeedsDisplay = true
         view.isPaused = true
-        view.clearColor = LiquidGlassSystem.neutralCanvasClearColor
+        view.clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: view.effectiveAppearance)
         view.delegate = context.coordinator
         view.onScreenMaxEDRChanged = onScreenMaxEDRChanged
 
@@ -97,6 +104,7 @@ struct EDRMetalPreviewView: NSViewRepresentable {
 
     func updateNSView(_ nsView: EDRMTKView, context: Context) {
         nsView.onScreenMaxEDRChanged = onScreenMaxEDRChanged
+        nsView.clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: nsView.effectiveAppearance)
         let targetCS = Self.targetColorSpace(for: renderedFrame?.baseColorSpace ?? baseColorSpace)
         if nsView.colorspace !== targetCS {
             nsView.colorspace = targetCS
@@ -245,7 +253,7 @@ struct EDRMetalPreviewView: NSViewRepresentable {
             }
 
             rpd.colorAttachments[0].loadAction = .clear
-            rpd.colorAttachments[0].clearColor = LiquidGlassSystem.neutralCanvasClearColor
+            rpd.colorAttachments[0].clearColor = LiquidGlassSystem.adaptiveCanvasClearColor(for: view.effectiveAppearance)
 
             guard let enc = cb.makeRenderCommandEncoder(descriptor: rpd) else {
                 return

@@ -851,7 +851,7 @@ def sidecar_path_for(raw_path: Path) -> Path:
 def build_v11_sidecar(
     *,
     schema_version: int = 2,
-    app_version: str = "1.1.0",
+    app_version: str = "1.1.1",
     preset_id: Optional[str] = "apple_heic",
     decode_backend: Optional[str] = None,
     demosaic: Optional[str] = None,
@@ -1371,18 +1371,21 @@ def check_app_bundle_v11(tools: HostTools, app_bundle: Path) -> Dict[str, Any]:
     frameworks_dir = app_bundle / "Contents" / "Frameworks"
 
     short_version: Optional[str] = None
+    icon_file: Optional[str] = None
     doc_extensions: List[str] = []
     if info_plist.is_file():
         try:
             with open(info_plist, "rb") as fh:
                 plist = plistlib.load(fh)
             short_version = plist.get("CFBundleShortVersionString")
+            icon_file = plist.get("CFBundleIconFile")
             for doc in plist.get("CFBundleDocumentTypes") or []:
                 for ext in doc.get("CFBundleTypeExtensions") or []:
                     doc_extensions.append(str(ext))
         except Exception as exc:
             errors.append(f"Failed to parse Info.plist: {exc}")
 
+    app_icon_icns = resources_dir / "AppIcon.icns"
     lensfun_xmls = list(resources_dir.rglob("LensfunDB/*.xml")) if resources_dir.is_dir() else []
     lensfun_licenses = list(resources_dir.rglob("LensfunDB/cc-by-sa-3.0.txt")) if resources_dir.is_dir() else []
     noise_profiles = [
@@ -1416,6 +1419,8 @@ def check_app_bundle_v11(tools: HostTools, app_bundle: Path) -> Dict[str, Any]:
     return {
         **base,
         "short_version": short_version,
+        "icon_file": icon_file,
+        "app_icon_icns": str(app_icon_icns) if app_icon_icns.is_file() else None,
         "doc_extensions": doc_extensions,
         "lensfun_xml_files": [str(p) for p in lensfun_xmls],
         "lensfun_license_files": [str(p) for p in lensfun_licenses],
@@ -1464,170 +1469,62 @@ def probe_binary_strings_and_symbols(
     }
 
 
-def _decode_arm64_bitmask(n: int, imms: int, immr: int, reg_size: int) -> Optional[int]:
-    combined = (n << 6) | (~imms & 0x3F)
-    b = combined.bit_length() - 1
-    if b < 1:
-        return None
-    esize = 1 << b
-    if esize > reg_size:
-        return None
-    levels = esize - 1
-    s = imms & levels
-    if s == levels:
-        return None
-    r = immr & levels
-    welem = (1 << (s + 1)) - 1
-    mask = (1 << esize) - 1
-    welem = ((welem >> r) | (welem << (esize - r))) & mask
-    pattern = 0
-    for shift in range(0, reg_size, esize):
-        pattern |= welem << shift
-    return pattern
-
-
-def _scan_arm64_float_immediates(
-    data: bytes,
-    targets_f64: set[int],
-    targets_f32: set[int],
-) -> Tuple[set[int], set[int]]:
-    """Decode arm64 MOVZ/MOVN/ORR+MOVK register materializations for IEEE-754 constants."""
-    found_64: set[int] = set()
-    found_32: set[int] = set()
-    n_words = len(data) // 4
-    if n_words == 0:
-        return found_64, found_32
-    words = array.array("I")
-    words.frombytes(data[: n_words * 4])
-
-    regs64 = [0] * 32
-    regs32 = [0] * 32
-    for insn in words:
-        op = insn & 0xFF800000
-        if op == 0xF2800000:  # MOVK Xd
-            rd = insn & 0x1F
-            shift = ((insn >> 21) & 0x3) * 16
-            imm16 = (insn >> 5) & 0xFFFF
-            regs64[rd] = (regs64[rd] & ~(0xFFFF << shift)) | (imm16 << shift)
-            if regs64[rd] in targets_f64:
-                found_64.add(regs64[rd])
-        elif op == 0xD2800000:  # MOVZ Xd
-            rd = insn & 0x1F
-            shift = ((insn >> 21) & 0x3) * 16
-            regs64[rd] = ((insn >> 5) & 0xFFFF) << shift
-            if regs64[rd] in targets_f64:
-                found_64.add(regs64[rd])
-        elif op == 0x92800000:  # MOVN Xd
-            rd = insn & 0x1F
-            shift = ((insn >> 21) & 0x3) * 16
-            regs64[rd] = (~(((insn >> 5) & 0xFFFF) << shift)) & 0xFFFFFFFFFFFFFFFF
-            if regs64[rd] in targets_f64:
-                found_64.add(regs64[rd])
-        elif (insn & 0xFF8003E0) == 0xB20003E0:  # ORR Xd, XZR, #imm
-            rd = insn & 0x1F
-            val = _decode_arm64_bitmask((insn >> 22) & 1, (insn >> 10) & 0x3F, (insn >> 16) & 0x3F, 64)
-            if val is not None:
-                regs64[rd] = val
-                if val in targets_f64:
-                    found_64.add(val)
-        elif op == 0x72800000:  # MOVK Wd
-            rd = insn & 0x1F
-            shift = ((insn >> 21) & 0x3) * 16
-            imm16 = (insn >> 5) & 0xFFFF
-            regs32[rd] = (regs32[rd] & ~(0xFFFF << shift)) | (imm16 << shift)
-            if regs32[rd] in targets_f32:
-                found_32.add(regs32[rd])
-        elif op == 0x52800000:  # MOVZ Wd
-            rd = insn & 0x1F
-            shift = ((insn >> 21) & 0x3) * 16
-            regs32[rd] = ((insn >> 5) & 0xFFFF) << shift
-            if regs32[rd] in targets_f32:
-                found_32.add(regs32[rd])
-        elif op == 0x12800000:  # MOVN Wd
-            rd = insn & 0x1F
-            shift = ((insn >> 21) & 0x3) * 16
-            regs32[rd] = (~(((insn >> 5) & 0xFFFF) << shift)) & 0xFFFFFFFF
-            if regs32[rd] in targets_f32:
-                found_32.add(regs32[rd])
-        elif (insn & 0xFF8003E0) == 0x320003E0:  # ORR Wd, WZR, #imm
-            rd = insn & 0x1F
-            val = _decode_arm64_bitmask((insn >> 22) & 1, (insn >> 10) & 0x3F, (insn >> 16) & 0x3F, 32)
-            if val is not None:
-                regs32[rd] = val
-                if val in targets_f32:
-                    found_32.add(val)
-    return found_64, found_32
-
-
 def probe_neutral_canvas_invariant(
     tools: HostTools,
     binary_path: Path,
 ) -> Dict[str, Any]:
-    """Verify PreviewCanvasView & EDRMetalPreviewView symbols and #111214 RGB constants in Mach-O."""
+    """Verify adaptive Liquid Glass canvas symbols/markers and removal of locked #111214 dark slab in Mach-O."""
     view_scan = probe_binary_strings_and_symbols(
         tools,
         binary_path,
-        ["PreviewCanvasView", "EDRMetalPreviewView"],
+        ["PreviewCanvasView", "EDRMetalPreviewView", "LiquidGlassSystem"],
     )
-    lit_scan = probe_binary_strings_and_symbols(
+    adaptive_scan = probe_binary_strings_and_symbols(
         tools,
         binary_path,
-        ["#111214", "111214"],
+        ["adaptive-liquid-glass", "chiaro.canvas.adaptive-liquid-glass"],
+    )
+    forbidden_scan = probe_binary_strings_and_symbols(
+        tools,
+        binary_path,
+        ["#111214"],
     )
 
-    approx_rgb: List[Tuple[str, float]] = [
-        ("r_0.067", 0.067),
-        ("g_0.071", 0.071),
-        ("b_0.078", 0.078),
-    ]
-    exact_rgb: List[Tuple[str, float]] = [
-        ("r_17_255", 17.0 / 255.0),
-        ("g_18_255", 18.0 / 255.0),
-        ("b_20_255", 20.0 / 255.0),
-    ]
+    views_ok = view_scan["all_found"]
+    adaptive_ok = len(adaptive_scan["matched"]) > 0
+    no_locked_dark_canvas = len(forbidden_scan["matched"]) == 0
 
-    data = binary_path.read_bytes()
-    all_vals = [v for _, v in approx_rgb + exact_rgb]
-    targets_f64 = {struct.unpack("<Q", struct.pack("<d", v))[0] for v in all_vals}
-    targets_f32 = {struct.unpack("<I", struct.pack("<f", v))[0] for v in all_vals}
-    arm64_f64_hits, arm64_f32_hits = _scan_arm64_float_immediates(data, targets_f64, targets_f32)
-
-    def _channel_present(val: float) -> bool:
-        b64 = struct.pack("<d", val)
-        b32 = struct.pack("<f", val)
-        u64 = struct.unpack("<Q", b64)[0]
-        u32 = struct.unpack("<I", b32)[0]
-        return (
-            (b64 in data)
-            or (b32 in data)
-            or (u64 in arm64_f64_hits)
-            or (u32 in arm64_f32_hits)
+    errors: List[str] = []
+    if not views_ok:
+        errors.append(f"Missing required canvas/LiquidGlass symbols: {view_scan['missing']}")
+    if not adaptive_ok:
+        errors.append(
+            "Missing adaptive Liquid Glass canvas marker ('adaptive-liquid-glass' / 'chiaro.canvas.adaptive-liquid-glass')"
         )
-
-    approx_found = [name for name, val in approx_rgb if _channel_present(val)]
-    exact_found = [name for name, val in exact_rgb if _channel_present(val)]
+    if not no_locked_dark_canvas:
+        errors.append(f"Locked dark canvas string still present in binary: {forbidden_scan['matched']}")
 
     matched_scheme: Optional[str] = None
-    if len(approx_found) == 3:
-        matched_scheme = "ieee754_0.067_0.071_0.078"
-    elif len(exact_found) == 3:
-        matched_scheme = "ieee754_17_18_20_255"
-    elif lit_scan["matched"]:
-        matched_scheme = "literal_hex_string"
+    if adaptive_ok and no_locked_dark_canvas:
+        if "chiaro.canvas.adaptive-liquid-glass" in adaptive_scan["matched"]:
+            matched_scheme = "chiaro.canvas.adaptive-liquid-glass"
+        else:
+            matched_scheme = "adaptive-liquid-glass"
 
-    views_ok = view_scan["all_found"]
-    color_ok = matched_scheme is not None
+    color_ok = adaptive_ok and no_locked_dark_canvas
 
     return {
         "binary": str(binary_path),
         "views_found": view_scan["matched"],
         "views_missing": view_scan["missing"],
         "views_ok": views_ok,
+        "adaptive_markers_found": adaptive_scan["matched"],
+        "adaptive_ok": adaptive_ok,
+        "forbidden_dark_canvas_hits": forbidden_scan["matched"],
+        "no_locked_dark_canvas": no_locked_dark_canvas,
         "matched_scheme": matched_scheme,
-        "approx_channels_found": approx_found,
-        "exact_channels_found": exact_found,
-        "literal_hits": lit_scan["matched"],
         "color_ok": color_ok,
+        "errors": errors,
         "ok": views_ok and color_ok,
     }
 

@@ -15,7 +15,7 @@ struct ContentView: View {
             SidebarQueueView(viewModel: viewModel)
             PreviewCanvasView(viewModel: viewModel)
                 .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityIdentifier("chiaro.canvas.\(LiquidGlassSystem.neutralCanvasHex)")
+                .accessibilityIdentifier("chiaro.canvas.\(LiquidGlassSystem.adaptiveCanvasStyleIdentifier)")
             if viewModel.workspaceMode == .preset {
                 PresetModeInspectorView(viewModel: viewModel)
             } else {

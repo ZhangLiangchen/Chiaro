@@ -31,7 +31,6 @@ func testSidecarAtomicSaveReloadOverwriteAndZeroTempLeftovers() throws {
 
     let initial = ChiaroSidecar(
         schemaVersion: 2,
-        appVersion: "1.1.0",
         updatedAt: fixedDate,
         presetID: "apple_heic",
         decodeBackend: .libraw,
@@ -70,6 +69,7 @@ func testSidecarAtomicSaveReloadOverwriteAndZeroTempLeftovers() throws {
     let loaded = try #require(try ChiaroSidecar.loadIfExists(for: rawURL))
     #expect(loaded == initial)
     #expect(loaded.schemaVersion == 2)
+    #expect(loaded.appVersion == "1.1.1")
 
     // Verify canonical JSON contains "aiColor": null and zero leftover .tmp files
     let rawJSON = try String(contentsOf: ChiaroSidecar.sidecarURL(for: rawURL), encoding: .utf8)
@@ -170,8 +170,27 @@ func testSidecarForwardCompatibilityUnknownKeysFutureSchemaAndTimestamps() throw
     try minimalJSON.write(to: ChiaroSidecar.sidecarURL(for: minimalRawURL), atomically: true, encoding: .utf8)
     let minimal = try #require(try ChiaroSidecar.loadIfExists(for: minimalRawURL))
     #expect(minimal.schemaVersion == 2)
+    #expect(minimal.appVersion == "1.1.1")
     #expect(minimal.demosaic == .dcb)
     #expect(minimal.presetID == nil)
+
+    // Case 2b: Backward-compatible decoding of existing v1.1.0 sidecars preserves appVersion "1.1.0"
+    let legacyV110RawURL = dir.appendingPathComponent("DSC01100.ARW")
+    let legacyV110JSON = """
+    {
+      "schemaVersion": 2,
+      "appVersion": "1.1.0",
+      "updatedAt": "2026-11-26T01:45:00Z",
+      "presetID": "apple_heic",
+      "demosaic": "amaze"
+    }
+    """
+    try legacyV110JSON.write(to: ChiaroSidecar.sidecarURL(for: legacyV110RawURL), atomically: true, encoding: .utf8)
+    let legacyV110 = try #require(try ChiaroSidecar.loadIfExists(for: legacyV110RawURL))
+    #expect(legacyV110.schemaVersion == 2)
+    #expect(legacyV110.appVersion == "1.1.0")
+    #expect(legacyV110.presetID == "apple_heic")
+    #expect(legacyV110.demosaic == .amaze)
 
     // Case 3: Precedence integration with sidecar loaded from disk
     let appleHEIC = try PresetLoader.loadBuiltIn(id: .appleHEIC)
