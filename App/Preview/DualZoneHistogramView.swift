@@ -1,19 +1,21 @@
+import ChiaroAppCore
 import ChiaroCore
 import SwiftUI
 
 struct DualZoneHistogramView: View {
     let bins: [UInt32]
     let displayHeadroom: LinearHeadroom
+    var language: ResolvedLanguage = .zhHans
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("双区 HDR 直方图 (SDR [-6..0 EV] | HDR (0..+4 EV])")
+                Text(ChiaroStrings.histogramTitle(language))
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 let simStops = displayHeadroom.toStops().log2Value
-                Text(String(format: "模拟上限: %.1f× (+%.1f EV)", displayHeadroom.multiplier, simStops))
+                Text(ChiaroStrings.histogramSimLimit(mult: displayHeadroom.multiplier, ev: simStops, lang: language))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.orange)
             }
@@ -21,7 +23,6 @@ struct DualZoneHistogramView: View {
             Canvas { context, size in
                 guard size.width > 4, size.height > 4 else { return }
 
-                // Background zones: SDR (left) & HDR (right)
                 let midX = size.width * 0.5
                 context.fill(
                     Path(CGRect(x: 0, y: 0, width: midX, height: size.height)),
@@ -33,7 +34,6 @@ struct DualZoneHistogramView: View {
                 )
 
                 let safeBins = bins.count == 256 ? bins : Array(repeating: UInt32(0), count: 256)
-                // Use log scaling with robust normalization so midtones & HDR highlights are both legible
                 let maxVal = max(safeBins.max() ?? 1, 1)
                 let logMax = log1p(Double(maxVal))
 
@@ -66,13 +66,11 @@ struct DualZoneHistogramView: View {
                 context.fill(sdrPath, with: .color(Color.white.opacity(0.75)))
                 context.fill(hdrPath, with: .color(Color.orange.opacity(0.9)))
 
-                // 0 EV Diffuse White boundary at bin 128
                 var zeroEVLine = Path()
                 zeroEVLine.move(to: CGPoint(x: midX, y: 0))
                 zeroEVLine.addLine(to: CGPoint(x: midX, y: size.height))
                 context.stroke(zeroEVLine, with: .color(.cyan.opacity(0.85)), lineWidth: 1.5)
 
-                // Active simulated headroom marker inside HDR zone (0..+4 EV)
                 let simEV = min(max(displayHeadroom.toStops().log2Value, 0.0), 4.0)
                 let simX = midX + CGFloat(simEV / 4.0) * (size.width - midX)
                 var simLine = Path()
@@ -96,7 +94,7 @@ struct DualZoneHistogramView: View {
                 Spacer()
                 Text("-3 EV")
                 Spacer()
-                Text("0 EV 漫反射白")
+                Text(ChiaroStrings.histogramZeroEV(language))
                     .foregroundStyle(.cyan)
                 Spacer()
                 Text("+2 EV")

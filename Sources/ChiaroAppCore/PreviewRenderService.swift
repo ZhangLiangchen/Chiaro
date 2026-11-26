@@ -44,6 +44,11 @@ public actor PreviewRenderService {
         engineInstance?.texturePool.evictIdle()
     }
 
+    public func invalidateOpticsEngine() {
+        engineInstance?.texturePool.evictIdle()
+        engineInstance = nil
+    }
+
     public func decodeProxy(url: URL, backend: RAWBackend) async throws -> DecodedRAWFrame {
         let canonical = url.resolvingSymlinksInPath().standardizedFileURL.path
         let key = ProxyCacheKey(canonicalPath: canonical, backend: backend)
@@ -132,6 +137,11 @@ public actor PreviewRenderService {
             displayHeadroom: displayHeadroom
         )
 
+        let opticsResolution = OpticsPipelineEngine.resolveOpticsInfo(
+            frame: proxyFrame,
+            params: params.optics
+        )
+
         return PreviewRenderSnapshot(
             sourceURL: url,
             renderedFrame: rendered,
@@ -140,7 +150,11 @@ public actor PreviewRenderService {
             backendUsed: proxyFrame.backendUsed,
             colorMatrices: proxyFrame.colorMatrices,
             histogramBins: histBins,
-            uniforms: uniforms
+            uniforms: uniforms,
+            opticsResolution: opticsResolution,
+            isoSpeed: proxyFrame.isoSpeed,
+            lensModel: proxyFrame.lensModel,
+            cameraModel: proxyFrame.exif.model
         )
     }
 

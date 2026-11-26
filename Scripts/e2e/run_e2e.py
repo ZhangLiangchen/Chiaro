@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chiaro V1.0 Opaque-Box 4-Tier E2E Test Suite Runner."""
+"""Chiaro V1.1 Opaque-Box 4-Tier E2E Test Suite Runner."""
 
 from __future__ import annotations
 
@@ -20,20 +20,58 @@ if str(E2E_DIR) not in sys.path:
 from config import ConfigError, E2EConfig, build_config
 from probes.swift_probes import SwiftProbes
 from selftest.test_selftest import run_selftest
-from tests import tier1_features, tier2_boundaries, tier3_pairwise, tier4_scenarios
+from tests import (
+    tier1_features,
+    tier1_v11,
+    tier2_boundaries,
+    tier2_v11,
+    tier3_pairwise,
+    tier3_v11,
+    tier4_scenarios,
+    tier4_v11,
+)
 from tests.common import RunContext, TestCase, TestResult
 
 
-def collect_tests(tier: str, filter_substr: Optional[str]) -> List[TestCase]:
+def collect_tests(
+    tier: str,
+    filter_substr: Optional[str],
+    *,
+    feature_substr: Optional[str] = None,
+    baseline_only: bool = False,
+    v11_only: bool = False,
+) -> List[TestCase]:
+    if baseline_only and v11_only:
+        raise ValueError("--baseline-only and --v11-only are mutually exclusive")
+
     all_cases: List[TestCase] = []
+    include_baseline = not v11_only
+    include_v11 = not baseline_only
+
     if tier in ("1", "all"):
-        all_cases.extend(tier1_features.get_tests())
+        if include_baseline:
+            all_cases.extend(tier1_features.get_tests())
+        if include_v11:
+            all_cases.extend(tier1_v11.get_tests())
     if tier in ("2", "all"):
-        all_cases.extend(tier2_boundaries.get_tests())
+        if include_baseline:
+            all_cases.extend(tier2_boundaries.get_tests())
+        if include_v11:
+            all_cases.extend(tier2_v11.get_tests())
     if tier in ("3", "all"):
-        all_cases.extend(tier3_pairwise.get_tests())
+        if include_baseline:
+            all_cases.extend(tier3_pairwise.get_tests())
+        if include_v11:
+            all_cases.extend(tier3_v11.get_tests())
     if tier in ("4", "all"):
-        all_cases.extend(tier4_scenarios.get_tests())
+        if include_baseline:
+            all_cases.extend(tier4_scenarios.get_tests())
+        if include_v11:
+            all_cases.extend(tier4_v11.get_tests())
+
+    if feature_substr:
+        f_needle = feature_substr.lower()
+        all_cases = [tc for tc in all_cases if f_needle in tc.feature.lower()]
 
     if filter_substr:
         needle = filter_substr.lower()
@@ -98,13 +136,30 @@ def write_json_report(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="run_e2e.py",
-        description="Chiaro V1.0 Opaque-Box 4-Tier E2E Test Suite",
+        description="Chiaro V1.1 Opaque-Box 4-Tier E2E Test Suite",
     )
     parser.add_argument(
         "--tier",
         choices=["1", "2", "3", "4", "all"],
         default="all",
         help="Select tier to run or list (default: all)",
+    )
+    suite_group = parser.add_mutually_exclusive_group()
+    suite_group.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Include only the 164 v1.0 baseline E2E tests",
+    )
+    suite_group.add_argument(
+        "--v11-only",
+        action="store_true",
+        help="Include only the 66 v1.1 E2E tests",
+    )
+    parser.add_argument(
+        "--feature",
+        type=str,
+        default=None,
+        help="Case-insensitive filter on feature ID/tag (e.g. F01, F13, Pairwise)",
     )
     parser.add_argument(
         "--self-test",
@@ -146,7 +201,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    cases = collect_tests(args.tier, args.filter)
+    try:
+        cases = collect_tests(
+            args.tier,
+            args.filter,
+            feature_substr=args.feature,
+            baseline_only=args.baseline_only,
+            v11_only=args.v11_only,
+        )
+    except ValueError as exc:
+        print(f"[CONFIG ERROR] {exc}", file=sys.stderr)
+        return 2
 
     if args.list_tests:
         print_test_table(cases)

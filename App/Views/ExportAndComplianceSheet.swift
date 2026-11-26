@@ -7,28 +7,31 @@ struct ExportAndComplianceSheet: View {
     @Bindable var viewModel: AppViewModel
     @Environment(\.dismiss) private var dismiss
 
+    private var lang: ResolvedLanguage {
+        viewModel.resolvedLanguage
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             headerBar
 
-            // Active preset advisory banner
             HStack(spacing: 8) {
                 Image(systemName: "info.circle.fill")
                     .foregroundStyle(.orange)
-                Text(viewModel.activePreset.platformAdvisory)
+                Text(ChiaroStrings.presetAdvisory(viewModel.activePreset, lang: lang))
                     .font(.caption)
                     .foregroundStyle(.primary)
                 Spacer()
-                Button("防坑指南") {
+                Button(ChiaroStrings.shortGuideButton(lang)) {
                     viewModel.showGuideFromExportSheet = true
                 }
                 .controlSize(.small)
                 .sheet(isPresented: $viewModel.showGuideFromExportSheet) {
-                    PublishingGuideView()
+                    PublishingGuideView(language: lang)
                 }
             }
             .padding(10)
-            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            .chiaroGlassSurface(cornerRadius: 8, tint: Color.orange.opacity(0.18))
 
             HStack(alignment: .top, spacing: 16) {
                 exportOptionsColumn
@@ -49,21 +52,25 @@ struct ExportAndComplianceSheet: View {
             get: { viewModel.inspectingArtifact.map { InspectableArtifact(artifact: $0) } },
             set: { viewModel.inspectingArtifact = $0?.artifact }
         )) { wrapped in
-            ComplianceDetailSheet(artifact: wrapped.artifact)
+            ComplianceDetailSheet(artifact: wrapped.artifact, language: lang)
         }
     }
 
     private var headerBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("批量导出与 ISO/IEC 21496-1 合规校验")
+                Text(ChiaroStrings.exportSheetTitle(lang))
                     .font(.title3.bold())
-                Text("当前预设: \(viewModel.activePreset.name) · 队列共 \(viewModel.items.count) 张 .ARW")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text(ChiaroStrings.exportSheetSubtitle(
+                    presetName: ChiaroStrings.presetName(viewModel.activePreset, lang: lang),
+                    count: viewModel.items.count,
+                    lang: lang
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("关闭") {
+            Button(ChiaroStrings.closeButton(lang)) {
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
@@ -73,7 +80,7 @@ struct ExportAndComplianceSheet: View {
     private var exportOptionsColumn: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                GroupBox("输出格式（可多选单次解码并发扇出）") {
+                GroupBox(ChiaroStrings.outputFormatsGroup(lang)) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 12) {
                             formatToggle(.heic, label: "HEIC")
@@ -85,10 +92,10 @@ struct ExportAndComplianceSheet: View {
                         if viewModel.activePreset.outputFormats.contains(.heic)
                             || viewModel.activePreset.outputFormats.contains(.avif) {
                             HStack {
-                                Text("基础色深:")
+                                Text(ChiaroStrings.baseBitDepthLabel(lang))
                                     .font(.caption)
                                 Spacer()
-                                Picker("色深", selection: $viewModel.activePreset.bitDepth) {
+                                Picker(ChiaroStrings.baseBitDepthLabel(lang), selection: $viewModel.activePreset.bitDepth) {
                                     Text("10-bit").tag(BitDepth.bit10)
                                     Text("8-bit").tag(BitDepth.bit8)
                                 }
@@ -99,26 +106,24 @@ struct ExportAndComplianceSheet: View {
                             }
                         }
 
-                        HStack {
-                            Text("基础色域:")
-                                .font(.caption)
-                            Spacer()
-                            Picker("色域", selection: Binding(
+                        DocumentedPicker(
+                            parameterID: .baseColorSpace,
+                            language: lang,
+                            showInlineSummary: viewModel.showInlineParameterSummaries,
+                            selection: Binding(
                                 get: { viewModel.activePreset.baseColorSpace },
                                 set: { viewModel.setBaseColorSpace($0) }
-                            )) {
-                                Text("Display P3").tag(BaseColorSpace.displayP3)
-                                Text("sRGB").tag(BaseColorSpace.srgb)
-                            }
-                            .labelsHidden()
-                            .pickerStyle(.segmented)
-                            .frame(width: 170)
-                            .controlSize(.small)
+                            ),
+                            pickerStyleSegmented: true,
+                            pickerWidth: 170
+                        ) {
+                            Text("Display P3").tag(BaseColorSpace.displayP3)
+                            Text("sRGB").tag(BaseColorSpace.srgb)
                         }
 
                         VStack(alignment: .leading, spacing: 2) {
                             HStack {
-                                Text("图像质量:")
+                                Text(ChiaroStrings.imageQualityLabel(lang))
                                     .font(.caption)
                                 Spacer()
                                 Text("\(viewModel.activePreset.qualityPercent)%")
@@ -131,10 +136,10 @@ struct ExportAndComplianceSheet: View {
 
                         if viewModel.activePreset.outputFormats.contains(.avif) {
                             HStack {
-                                Text("AVIF 编码器:")
+                                Text(ChiaroStrings.avifEncoderLabel(lang))
                                     .font(.caption)
                                 Spacer()
-                                Picker("AVIF 编码器", selection: $viewModel.activePreset.avifCodec) {
+                                Picker(ChiaroStrings.avifEncoderLabel(lang), selection: $viewModel.activePreset.avifCodec) {
                                     Text("SVT-AV1").tag(AVIFCodecChoice.svtAV1)
                                     Text("libaom").tag(AVIFCodecChoice.libaom)
                                 }
@@ -152,7 +157,7 @@ struct ExportAndComplianceSheet: View {
                     .padding(6)
                 }
 
-                GroupBox("输出路径与命名规则") {
+                GroupBox(ChiaroStrings.outputPathGroup(lang)) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text(viewModel.outputDirectory.path)
@@ -160,19 +165,19 @@ struct ExportAndComplianceSheet: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer()
-                            Button("选择目录...") {
+                            Button(ChiaroStrings.chooseFolderShort(lang)) {
                                 viewModel.presentOutputDirectoryPanel()
                             }
                             .controlSize(.small)
                         }
 
-                        Toggle("按格式分子目录 (--format-subdirs: heic/ jpeg/ avif/ mp4/)", isOn: $viewModel.useFormatSubdirectories)
+                        Toggle(ChiaroStrings.formatSubdirsToggle(lang), isOn: $viewModel.useFormatSubdirectories)
                             .toggleStyle(.checkbox)
                             .controlSize(.small)
                             .font(.caption)
 
                         HStack {
-                            Text("命名模板:")
+                            Text(ChiaroStrings.namingTemplateLabel(lang))
                                 .font(.caption)
                             TextField("{name}_HDR.{ext}", text: $viewModel.namingTemplate)
                                 .textFieldStyle(.roundedBorder)
@@ -187,27 +192,27 @@ struct ExportAndComplianceSheet: View {
                                 presetID: viewModel.activePreset.id,
                                 format: firstFormat
                             )
-                            Text("文件名预览: \(previewName)")
+                            Text(ChiaroStrings.filenamePreview(previewName, lang: lang))
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(.secondary)
                         }
 
                         HStack {
-                            Text("同名冲突:")
+                            Text(ChiaroStrings.conflictPolicyLabel(lang))
                                 .font(.caption)
                             Spacer()
-                            Picker("冲突策略", selection: $viewModel.conflictPolicy) {
-                                Text("覆盖").tag(ConflictPolicy.overwrite)
-                                Text("跳过").tag(ConflictPolicy.skip)
-                                Text("自动编号").tag(ConflictPolicy.autoNumber)
+                            Picker(ChiaroStrings.conflictPolicyLabel(lang), selection: $viewModel.conflictPolicy) {
+                                Text(ChiaroStrings.conflictPolicyName(.overwrite, lang: lang)).tag(ConflictPolicy.overwrite)
+                                Text(ChiaroStrings.conflictPolicyName(.skip, lang: lang)).tag(ConflictPolicy.skip)
+                                Text(ChiaroStrings.conflictPolicyName(.autoNumber, lang: lang)).tag(ConflictPolicy.autoNumber)
                             }
                             .labelsHidden()
                             .pickerStyle(.segmented)
-                            .frame(width: 185)
+                            .frame(width: 210)
                             .controlSize(.small)
                         }
 
-                        Toggle("导出后自动执行 ISO 21496-1 / HLG 合规校验", isOn: $viewModel.verifyAfterExport)
+                        Toggle(ChiaroStrings.verifyAfterExportToggle(lang), isOn: $viewModel.verifyAfterExport)
                             .toggleStyle(.checkbox)
                             .controlSize(.small)
                             .font(.caption)
@@ -232,15 +237,15 @@ struct ExportAndComplianceSheet: View {
         let opts = viewModel.activePreset.hlgVideoOptions ?? HLGVideoOptions()
         return VStack(alignment: .leading, spacing: 6) {
             Divider()
-            Text("抖音 10-bit BT.2020 HLG MP4 参数 (30fps · 禁 4K)")
+            Text(ChiaroStrings.hlgVideoSectionHeader(lang))
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
 
             HStack {
-                Text("视频画幅:")
+                Text(ChiaroStrings.videoAspectLabel(lang))
                     .font(.caption)
                 Spacer()
-                Picker("画幅", selection: Binding(
+                Picker(ChiaroStrings.videoAspectLabel(lang), selection: Binding(
                     get: { opts.aspect },
                     set: { newAspect in
                         var updated = opts
@@ -256,7 +261,7 @@ struct ExportAndComplianceSheet: View {
             }
 
             HStack {
-                Text("时长:")
+                Text(ChiaroStrings.videoDurationLabel(lang))
                     .font(.caption)
                 Slider(value: Binding(
                     get: { opts.durationSeconds },
@@ -273,7 +278,7 @@ struct ExportAndComplianceSheet: View {
             }
 
             HStack {
-                Text("码率:")
+                Text(ChiaroStrings.videoBitrateLabel(lang))
                     .font(.caption)
                 Slider(value: Binding(
                     get: { opts.bitrateMbps },
@@ -294,16 +299,13 @@ struct ExportAndComplianceSheet: View {
     private var resultsAndComplianceColumn: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("导出进度与合规徽章")
+                Text(ChiaroStrings.exportProgressTitle(lang))
                     .font(.headline)
                 Spacer()
                 if let summary = viewModel.batchSummary {
-                    Text(String(
-                        format: "完成 %d/%d（失败 %d）· %.2fs",
-                        summary.succeeded, summary.totalJobs, summary.failed, summary.elapsedSeconds
-                    ))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(summary.failed == 0 ? .green : .orange)
+                    Text(ChiaroStrings.exportSummaryText(summary, lang: lang))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(summary.failed == 0 ? .green : .orange)
                 }
             }
 
@@ -312,8 +314,12 @@ struct ExportAndComplianceSheet: View {
                     value: Double(viewModel.exportCompletedCount),
                     total: Double(max(1, viewModel.exportTotalCount))
                 ) {
-                    Text("正在处理 \(viewModel.exportCompletedCount) / \(viewModel.exportTotalCount)...")
-                        .font(.caption)
+                    Text(ChiaroStrings.processingCount(
+                        done: viewModel.exportCompletedCount,
+                        total: viewModel.exportTotalCount,
+                        lang: lang
+                    ))
+                    .font(.caption)
                 }
             }
 
@@ -323,13 +329,13 @@ struct ExportAndComplianceSheet: View {
                         Text(item.fileName)
                             .font(.callout.weight(.semibold))
                         Spacer()
-                        Text(item.status.label)
+                        Text(item.status.label(for: lang))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
 
                     if let fallback = item.lastFallbackReason {
-                        Text("解码回退: \(fallback)")
+                        Text(ChiaroStrings.decodeFallbackRow(fallback, lang: lang))
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
@@ -358,17 +364,17 @@ struct ExportAndComplianceSheet: View {
         if let report {
             let hasWarning = report.checks.contains(where: { $0.severity == .warning })
             if !report.passed {
-                badgeTitle = "HDR 合规失败 ❌"
+                badgeTitle = ChiaroStrings.complianceFailBadge(lang)
                 tint = .red
             } else if hasWarning {
-                badgeTitle = "警告 ⚠️"
+                badgeTitle = ChiaroStrings.complianceWarnBadge(lang)
                 tint = .orange
             } else {
-                badgeTitle = "HDR 合规通过 ✅"
+                badgeTitle = ChiaroStrings.compliancePassBadge(lang)
                 tint = .green
             }
         } else {
-            badgeTitle = "未校验"
+            badgeTitle = ChiaroStrings.complianceUnverifiedBadge(lang)
             tint = .secondary
         }
 
@@ -392,7 +398,6 @@ struct ExportAndComplianceSheet: View {
 
             Spacer()
 
-            // Branch cleanly on .hlgMP4 vs still image formats
             if artifact.format == .hlgMP4 {
                 Text("BT.2020 HLG 10-bit")
                     .font(.caption2.monospacedDigit())
@@ -427,27 +432,29 @@ struct ExportAndComplianceSheet: View {
     }
 
     private var footerActionBar: some View {
-        HStack {
-            Button("打开输出目录") {
-                try? FileManager.default.createDirectory(at: viewModel.outputDirectory, withIntermediateDirectories: true)
-                NSWorkspace.shared.open(viewModel.outputDirectory)
-            }
-            .controlSize(.regular)
-
-            Spacer()
-
-            if viewModel.isExporting {
-                Button("取消导出", role: .destructive) {
-                    viewModel.cancelBatchExport()
+        ChiaroGlassContainer(spacing: 10) {
+            HStack {
+                Button(ChiaroStrings.openOutputDirButton(lang)) {
+                    try? FileManager.default.createDirectory(at: viewModel.outputDirectory, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(viewModel.outputDirectory)
                 }
-                .buttonStyle(.bordered)
-            }
+                .chiaroGlassButtonStyle(prominent: false)
 
-            Button("开始批量导出") {
-                viewModel.startBatchExport()
+                Spacer()
+
+                if viewModel.isExporting {
+                    Button(ChiaroStrings.cancelExportButton(lang), role: .destructive) {
+                        viewModel.cancelBatchExport()
+                    }
+                    .chiaroGlassButtonStyle(prominent: false)
+                }
+
+                Button(ChiaroStrings.startBatchExportButton(lang)) {
+                    viewModel.startBatchExport()
+                }
+                .chiaroGlassButtonStyle(prominent: true)
+                .disabled(viewModel.isExporting || viewModel.items.isEmpty)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(viewModel.isExporting || viewModel.items.isEmpty)
         }
     }
 }
@@ -459,6 +466,7 @@ private struct InspectableArtifact: Identifiable {
 
 private struct ComplianceDetailSheet: View {
     let artifact: ExportArtifact
+    let language: ResolvedLanguage
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -472,19 +480,23 @@ private struct ComplianceDetailSheet: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("关闭") { dismiss() }
+                Button(ChiaroStrings.closeButton(language)) { dismiss() }
             }
 
             if let report = artifact.compliance {
                 HStack(spacing: 14) {
-                    Text(report.passed ? "校验结论: 通过 ✅" : "校验结论: 未通过 ❌")
+                    Text(ChiaroStrings.complianceVerdict(passed: report.passed, lang: language))
                         .font(.subheadline.weight(.semibold))
                     if let hr = report.measuredHeadroom {
-                        Text(String(format: "实测 Headroom: %.2f× (+%.2f EV)", hr.multiplier, hr.toStops().log2Value))
-                            .font(.caption.monospacedDigit())
+                        Text(ChiaroStrings.complianceMeasuredHeadroom(
+                            mult: hr.multiplier,
+                            ev: hr.toStops().log2Value,
+                            lang: language
+                        ))
+                        .font(.caption.monospacedDigit())
                     }
                     if let depth = report.measuredBitDepth {
-                        Text("色深: \(depth)-bit")
+                        Text(ChiaroStrings.complianceBitDepth(depth, lang: language))
                             .font(.caption)
                     }
                     if let orient = report.measuredOrientation {
@@ -507,7 +519,7 @@ private struct ComplianceDetailSheet: View {
                 }
                 .listStyle(.inset)
             } else {
-                Text("此导出产物未运行自动合规探针（已关闭导出后校验）。")
+                Text(ChiaroStrings.complianceNotRun(language))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

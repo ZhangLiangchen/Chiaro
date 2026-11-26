@@ -10,18 +10,30 @@ import time
 from pathlib import Path
 from typing import List
 
-from config import BUILTIN_PRESET_IDS, FORBIDDEN_LICENSE_PATTERNS, PEAK_RSS_LIMIT_BYTES
-from probes.cli_probes import check_app_bundle, probe_avifdec, probe_exiftool, probe_ffprobe
+from config import (
+    BUILTIN_PRESET_IDS,
+    FORBIDDEN_LICENSE_PATTERNS,
+    FORBIDDEN_SYMBOL_PATTERNS,
+    PEAK_RSS_LIMIT_BYTES,
+)
+from probes.cli_probes import (
+    check_app_bundle,
+    check_gpl3_compatible_linkage,
+    probe_avifdec,
+    probe_exiftool,
+    probe_ffprobe,
+    probe_verify_licenses_sbom,
+)
 from probes.isobmff_box import inspect_isobmff
 from tests.common import (
     RunContext,
     TestCase,
     assert_avif_compliant,
+    assert_gpl3_compatible,
     assert_headroom_within_tol,
     assert_heic_compliant,
     assert_hlg_mp4_compliant,
     assert_jpeg_compliant,
-    assert_zero_gpl,
     parse_ndjson_lines,
 )
 
@@ -37,18 +49,55 @@ def get_tests() -> List[TestCase]:
     tests: List[TestCase] = []
 
     # =========================================================================
-    # F01: Zero GPL / Zero LGPL Boundaries (6 tests)
+    # F01: GPL-3.0-or-later License & Symbol Boundaries (6 tests)
     # =========================================================================
     def t2_f01_01(ctx: RunContext) -> None:
         assert ctx.cfg.cli_bin is not None
         nm = ctx.cfg.tools.nm or "/usr/bin/nm"
-        res = ctx.run_cmd([nm, "-gU", str(ctx.cfg.cli_bin)])
-        assert res.returncode == 0
-        hits = [
-            ln for ln in res.stdout.splitlines()
-            if any(p in ln.lower() for p in ("dht_demosaic", "aahd_demosaic", "dcb_demosaic", "amaze"))
-        ]
-        assert not hits, f"Forbidden GPL demosaic symbols found: {hits}"
+        sym_hits: List[str] = []
+        for flag in ("-gU", "-u"):
+            res = ctx.run_cmd([nm, flag, str(ctx.cfg.cli_bin)])
+            assert res.returncode == 0, f"nm {flag} failed: {res.stderr}"
+            for ln in res.stdout.splitlines():
+                if any(pat in ln for pat in FORBIDDEN_SYMBOL_PATTERNS):
+                    sym_hits.append(f"{flag}: {ln.strip()}")
+        assert not sym_hits, f"Forbidden library symbols found in {ctx.cfg.cli_bin.name}: {sym_hits[:10]}"
+
+        link_res = check_gpl3_compatible_linkage(
+            ctx.cfg.tools,
+            ctx.cfg.cli_bin,
+            check_symbols=True,
+            require_self_contained=False,
+        )
+        assert link_res["clean"], (
+            f"GPL-3.0 linkage violation in {ctx.cfg.cli_bin.name}: "
+            f"forbidden_libs={link_res['forbidden_libs']}, "
+            f"unallowlisted={link_res['unallowlisted_refs']}, "
+            f"dangling={link_res['dangling_refs']}, "
+            f"syms={link_res['forbidden_symbols']}"
+        )
+
+        lic_text = (ctx.cfg.repo_root / "LICENSE").read_text(encoding="utf-8", errors="replace")
+        assert "GNU GENERAL PUBLIC LICENSE" in lic_text and "Version 3, 29 June 2007" in lic_text, (
+            "LICENSE is not GNU GPL v3.0 (GPL-3.0-or-later)"
+        )
+        notices_text = (ctx.cfg.repo_root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8", errors="replace")
+        assert "GPL-3.0-or-later" in notices_text and "LGPL-2.1" in notices_text, (
+            "THIRD_PARTY_NOTICES.md missing GPL-3.0-or-later or LGPL-2.1 declaration"
+        )
+        notice_table_rows = [ln for ln in notices_text.splitlines() if ln.strip().startswith("|")]
+        assert not any("GPL-2.0-only" in row for row in notice_table_rows), (
+            "Unexpected GPL-2.0-only license in THIRD_PARTY_NOTICES.md component table"
+        )
+
+        sbom = probe_verify_licenses_sbom(ctx.cfg.repo_root, require_binaries=False)
+        assert sbom["returncode"] == 0 and sbom["all_ok"], (
+            f"verify_licenses.sh failed: {sbom['stderr']}\n{sbom['stdout']}"
+        )
+        assert not any("GPL-2.0-only" in row["license"] for row in sbom["rows"]), (
+            f"Unexpected GPL-2.0-only component in SBOM: {sbom['rows']}"
+        )
+        ctx.note("T2-F01-01 verified GPL-3.0-or-later LICENSE/notices, zero forbidden symbols/libs, zero GPL-2.0-only")
 
     def t2_f01_02(ctx: RunContext) -> None:
         assert ctx.cfg.cli_bin is not None
@@ -60,13 +109,13 @@ def get_tests() -> List[TestCase]:
         if vendor.is_dir():
             targets.extend(sorted(vendor.rglob("*.dylib")))
         for t in targets:
-            assert_zero_gpl(ctx, t, check_symbols=True)
+            assert_gpl3_compatible(ctx, t, check_symbols=True)
 
     def t2_f01_03(ctx: RunContext) -> None:
         app = _require_app(ctx)
         info = check_app_bundle(ctx.cfg.tools, app)
         assert info["ok"], f"App bundle check errors: {info['errors']}"
-        res = assert_zero_gpl(ctx, Path(info["executable"]), check_symbols=True)
+        res = assert_gpl3_compatible(ctx, Path(info["executable"]), check_symbols=True)
         assert not res["dangling_refs"], f"Dangling /tmp refs in Chiaro: {res['dangling_refs']}"
         for line in res["otool_lines"][1:]:
             if "@rpath" in line:
@@ -123,7 +172,7 @@ def get_tests() -> List[TestCase]:
         assert_avif_compliant(ctx, out / "DSC02540_HDR.avif", expect_grid=True, expect_w=4672, expect_h=7008)
 
     tests.extend([
-        TestCase("T2-F01-01", 2, "F01", "No GPL Demosaic Symbols in LibRaw", t2_f01_01, "nm -gU chiaro (no dht/aahd/dcb/amaze)"),
+        TestCase("T2-F01-01", 2, "F01", "GPL-3.0-or-later Symbols, License & Linkage Guardrail", t2_f01_01, "nm (-gU/-u) + otool -L + LICENSE/THIRD_PARTY_NOTICES + verify_licenses.sh"),
         TestCase("T2-F01-02", 2, "F01", "All Mach-O Targets Clean License Scan", t2_f01_02, "otool -L + nm across CLI, App, Vendor/*.dylib"),
         TestCase("T2-F01-03", 2, "F01", "App Bundle Self-Contained Linkage", t2_f01_03, "Verify zero /tmp or dangling @rpath in Chiaro"),
         TestCase("T2-F01-04", 2, "F01", "Forbidden Library Strings & Script Enforcement", t2_f01_04, "strings scan + verify_licenses.sh"),
@@ -958,7 +1007,7 @@ def get_tests() -> List[TestCase]:
     def t2_f12_05(ctx: RunContext) -> None:
         app = _require_app(ctx)
         info = check_app_bundle(ctx.cfg.tools, app)
-        res = assert_zero_gpl(ctx, Path(info["executable"]), check_symbols=True)
+        res = assert_gpl3_compatible(ctx, Path(info["executable"]), check_symbols=True)
         joined = "\n".join(res["otool_lines"])
         for fw in ("Metal", "ImageIO", "AVFoundation"):
             assert fw in joined, f"Expected Apple framework {fw} in Chiaro linkage"

@@ -6,6 +6,10 @@ import UniformTypeIdentifiers
 struct SidebarQueueView: View {
     @Bindable var viewModel: AppViewModel
 
+    private var lang: ResolvedLanguage {
+        viewModel.resolvedLanguage
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             presetSection
@@ -14,7 +18,7 @@ struct SidebarQueueView: View {
             queueListSection
         }
         .padding(12)
-        .frame(minWidth: 265, idealWidth: 285, maxWidth: 320)
+        .frame(minWidth: 270, idealWidth: 295, maxWidth: 335)
         .background(.background)
         .onDrop(of: [.fileURL], isTargeted: $viewModel.isDropTargeted) { providers in
             handleDrop(providers: providers)
@@ -32,65 +36,126 @@ struct SidebarQueueView: View {
     private var presetSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("预设配置", systemImage: "slider.horizontal.3")
+                Label(ChiaroStrings.presetsTitle(lang), systemImage: "slider.horizontal.3")
                     .font(.headline)
                 Spacer()
-                Button("导入") {
-                    viewModel.presentImportPresetPanel()
+                if viewModel.workspaceMode == .pro {
+                    Button(ChiaroStrings.importButton(lang)) {
+                        viewModel.presentImportPresetPanel()
+                    }
+                    .controlSize(.small)
+                    Button(ChiaroStrings.exportButton(lang)) {
+                        viewModel.presentExportPresetPanel()
+                    }
+                    .controlSize(.small)
                 }
-                .controlSize(.small)
-                Button("导出") {
-                    viewModel.presentExportPresetPanel()
-                }
-                .controlSize(.small)
             }
 
-            Picker("预设", selection: Binding(
-                get: { viewModel.activePreset.id },
-                set: { newID in
-                    if let found = viewModel.allPresets.first(where: { $0.id == newID }) {
-                        viewModel.selectPreset(found)
+            if viewModel.workspaceMode == .preset {
+                ScrollView {
+                    ChiaroGlassContainer(spacing: 6) {
+                        VStack(spacing: 6) {
+                            ForEach(viewModel.allPresets) { preset in
+                                presetCard(preset)
+                            }
+                        }
                     }
                 }
-            )) {
-                ForEach(viewModel.allPresets) { preset in
-                    Text(preset.name).tag(preset.id)
+                .frame(maxHeight: 245)
+            } else {
+                Picker(ChiaroStrings.presetsTitle(lang), selection: Binding(
+                    get: { viewModel.activePreset.id },
+                    set: { newID in
+                        if let found = viewModel.allPresets.first(where: { $0.id == newID }) {
+                            viewModel.selectPreset(found)
+                        }
+                    }
+                )) {
+                    ForEach(viewModel.allPresets) { preset in
+                        Text(ChiaroStrings.presetName(preset, lang: lang)).tag(preset.id)
+                    }
                 }
+                .labelsHidden()
+                .pickerStyle(.menu)
             }
-            .labelsHidden()
-            .pickerStyle(.menu)
 
-            // Always show active preset platformAdvisory banner
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 4) {
                     Image(systemName: "lightbulb.fill")
                         .foregroundStyle(.orange)
-                    Text("平台发布提示")
+                    Text(ChiaroStrings.platformAdvisoryTitle(lang))
                         .font(.caption.weight(.semibold))
                 }
-                Text(viewModel.activePreset.platformAdvisory)
+                Text(ChiaroStrings.presetAdvisory(viewModel.activePreset, lang: lang))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+            .chiaroGlassSurface(cornerRadius: 8, tint: Color.orange.opacity(0.16))
+        }
+    }
+
+    private func presetCard(_ preset: PresetSchema) -> some View {
+        let selected = preset.id == viewModel.activePreset.id
+        return Button {
+            viewModel.selectPreset(preset)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(ChiaroStrings.presetName(preset, lang: lang))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Spacer()
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+
+                Text(ChiaroStrings.presetDescription(preset, lang: lang))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+
+                HStack(spacing: 4) {
+                    ForEach(ChiaroStrings.presetSpecTags(preset, lang: lang), id: \.self) { tag in
+                        Text(tag)
+                            .font(.system(size: 9, weight: .medium))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.08), in: Capsule())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .chiaroGlassSurface(
+                cornerRadius: 9,
+                tint: selected ? Color.accentColor.opacity(0.24) : nil,
+                interactive: true
+            )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.orange.opacity(0.28), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(selected ? Color.accentColor.opacity(0.65) : Color.clear, lineWidth: 1.2)
             )
         }
+        .buttonStyle(.plain)
     }
 
     private var queueHeaderSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Label("待处理队列 (\(viewModel.items.count))", systemImage: "photo.on.rectangle.angled")
+                Label(ChiaroStrings.queueTitle(count: viewModel.items.count, lang: lang), systemImage: "photo.on.rectangle.angled")
                     .font(.headline)
                 Spacer()
                 if !viewModel.items.isEmpty {
-                    Button("清空") {
+                    Button(ChiaroStrings.clearButton(lang)) {
                         viewModel.clearQueue()
                     }
                     .controlSize(.small)
@@ -103,25 +168,31 @@ struct SidebarQueueView: View {
                 Button {
                     viewModel.presentImportFilesPanel()
                 } label: {
-                    Label("文件", systemImage: "doc.badge.plus")
+                    Label(ChiaroStrings.filesButton(lang), systemImage: "doc.badge.plus")
                 }
                 .controlSize(.small)
 
                 Button {
                     viewModel.presentImportFolderPanel()
                 } label: {
-                    Label("文件夹", systemImage: "folder.badge.plus")
+                    Label(ChiaroStrings.folderButton(lang), systemImage: "folder.badge.plus")
                 }
                 .controlSize(.small)
 
                 Spacer()
 
-                Toggle("递归", isOn: $viewModel.recursiveImport)
+                Toggle(ChiaroStrings.recursiveToggle(lang), isOn: $viewModel.recursiveImport)
                     .toggleStyle(.checkbox)
                     .controlSize(.small)
                     .font(.caption)
-                    .help("导入文件夹时递归扫描子目录中的 .ARW 文件")
+                    .help(ChiaroStrings.recursiveHelp(lang))
             }
+
+            Toggle(ChiaroStrings.autoSaveSidecarLabel(lang), isOn: $viewModel.autoSaveSidecar)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -133,12 +204,14 @@ struct SidebarQueueView: View {
                     Image(systemName: "arrow.down.doc")
                         .font(.title2)
                         .foregroundStyle(.secondary)
-                    Text("拖拽 .ARW 文件或目录到此处")
+                    Text(ChiaroStrings.dropzoneTitle(lang))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("自动忽略 .HIF 及 *.ARW/ 目录，路径去重")
+                        .multilineTextAlignment(.center)
+                    Text(ChiaroStrings.dropzoneSubtitle(lang))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                        .multilineTextAlignment(.center)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -155,14 +228,16 @@ struct SidebarQueueView: View {
                         .tag(item.id)
                         .contextMenu {
                             if viewModel.hasDelta(for: item) {
-                                Button("重置此图微调") {
-                                    viewModel.perPhotoDeltas.removeValue(forKey: item.sourceURL)
-                                    if viewModel.selectedItem?.id == item.id {
-                                        viewModel.schedulePreviewRender(immediate: true)
-                                    }
+                                Button(ChiaroStrings.resetDeltaMenu(lang)) {
+                                    viewModel.resetDelta(for: item)
                                 }
                             }
-                            Button("从队列移除", role: .destructive) {
+                            if viewModel.hasSidecar(for: item) {
+                                Button(ChiaroStrings.deleteSidecarMenu(lang)) {
+                                    viewModel.deleteSidecar(for: item)
+                                }
+                            }
+                            Button(ChiaroStrings.removeFromQueueMenu(lang), role: .destructive) {
                                 viewModel.removeItem(item)
                             }
                             .disabled(viewModel.isExporting)
@@ -183,8 +258,17 @@ struct SidebarQueueView: View {
 
                 Spacer()
 
+                if viewModel.hasSidecar(for: item) {
+                    Text(ChiaroStrings.sidecarBadge(lang))
+                        .font(.system(size: 10, weight: .semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.teal.opacity(0.2), in: Capsule())
+                        .foregroundStyle(.teal)
+                }
+
                 if viewModel.hasDelta(for: item) {
-                    Text("Delta")
+                    Text(ChiaroStrings.deltaBadge(lang))
                         .font(.system(size: 10, weight: .semibold))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
@@ -196,7 +280,7 @@ struct SidebarQueueView: View {
             }
 
             if let fallback = item.lastFallbackReason {
-                Text("回退 LibRaw: \(fallback)")
+                Text(ChiaroStrings.fallbackPrefix(fallback, lang: lang))
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .lineLimit(1)
@@ -219,7 +303,7 @@ struct SidebarQueueView: View {
         case .idle:
             EmptyView()
         case .queued:
-            Text("排队")
+            Text(ChiaroStrings.queuedBadge(lang))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         case .decoding, .rendered:

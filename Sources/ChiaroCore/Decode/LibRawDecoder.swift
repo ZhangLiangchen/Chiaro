@@ -49,7 +49,7 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
             backend: .libraw,
             highlightMode: .opposedInpaint,
             isProxy: true,
-            maxThreadsPerWorker: 2,
+            maxThreadsPerWorker: 6,
             customRenderedHDR: false
         )
         return try await decode(url: url, options: proxyOpts, forceProxy: true)
@@ -144,6 +144,13 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
         cOpts.max_threads = Int32(min(max(options.maxThreadsPerWorker, 1), 8))
         cOpts.apply_inset_crop = 1
         cOpts.sraw_no_rgb = 0
+        switch options.demosaicAlgorithm {
+        case .amaze: cOpts.demosaic_algorithm = HDR_LIBRAW_DEMOSAIC_AMAZE
+        case .lmmse: cOpts.demosaic_algorithm = HDR_LIBRAW_DEMOSAIC_LMMSE
+        case .dcb:   cOpts.demosaic_algorithm = HDR_LIBRAW_DEMOSAIC_DCB
+        case .dht:   cOpts.demosaic_algorithm = HDR_LIBRAW_DEMOSAIC_DHT
+        case .ahd:   cOpts.demosaic_algorithm = HDR_LIBRAW_DEMOSAIC_AHD
+        }
         return cOpts
     }
 
@@ -172,7 +179,7 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
             )
         }
 
-        return try mapImageToFrame(&img, sourceURL: url, options: options)
+        return try mapImageToFrame(&img, sourceURL: url, options: options, forceProxy: forceProxy)
     }
 
     private static func decodeBufferSync(
@@ -201,7 +208,7 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
             )
         }
 
-        return try mapImageToFrame(&img, sourceURL: sourceURL, options: options)
+        return try mapImageToFrame(&img, sourceURL: sourceURL, options: options, forceProxy: forceProxy)
     }
 
     private static func extractErrorMessage(from img: inout HDRLibRawImage) -> String {
@@ -222,7 +229,8 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
     private static func mapImageToFrame(
         _ img: inout HDRLibRawImage,
         sourceURL: URL,
-        options: DecodeOptions
+        options: DecodeOptions,
+        forceProxy: Bool
     ) throws -> DecodedRAWFrame {
         let width = Int(img.width)
         let height = Int(img.height)
@@ -360,6 +368,64 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
             exif.gpsDateStamp = cStringOrNil(img.exif.gps_date_stamp)
         }
 
+        let fullSensorDimensions: PixelDimensions? = (img.raw_width > 0 && img.raw_height > 0)
+            ? PixelDimensions(width: Int(img.raw_width), height: Int(img.raw_height))
+            : nil
+
+        let resolvedCropFactor: Double = {
+            if let fMM = exif.focalLengthMM, fMM > 0, let f35 = exif.focalLengthIn35mmFilm, f35 > 0 {
+                let ratio = Double(f35) / fMM
+                if (1.42...1.60).contains(ratio) { return 1.5 }
+                if (0.94...1.06).contains(ratio) { return 1.0 }
+                if ratio.isFinite && ratio > 0 { return ratio }
+            }
+            if img.camera_format == 1 { return 1.5 }
+            if img.camera_format == 2 { return 1.0 }
+            if img.embedded_sony_optics.has_optics != 0 && img.embedded_sony_optics.distortion_node_count == 11 {
+                return 1.5
+            }
+            return 1.0
+        }()
+
+        let embeddedSonyOptics: EmbeddedSonyOpticsPayload? = {
+            let cOptics = img.embedded_sony_optics
+            guard cOptics.has_optics != 0 else { return nil }
+            let distCount = min(max(Int(cOptics.distortion_node_count), 0), EmbeddedSonyOpticsPayload.maxNodeCount)
+            let caCount = min(max(Int(cOptics.ca_node_count), 0), EmbeddedSonyOpticsPayload.maxNodeCount)
+            let vigCount = min(max(Int(cOptics.vignetting_node_count), 0), EmbeddedSonyOpticsPayload.maxNodeCount)
+
+            let distParams = withUnsafeBytes(of: cOptics.distortion_params) { raw in
+                Array(raw.bindMemory(to: Int16.self).prefix(distCount))
+            }
+            let caRedParams = withUnsafeBytes(of: cOptics.ca_red_params) { raw in
+                Array(raw.bindMemory(to: Int16.self).prefix(caCount))
+            }
+            let caBlueParams = withUnsafeBytes(of: cOptics.ca_blue_params) { raw in
+                Array(raw.bindMemory(to: Int16.self).prefix(caCount))
+            }
+            let vigParams = withUnsafeBytes(of: cOptics.vignetting_params) { raw in
+                Array(raw.bindMemory(to: Int16.self).prefix(vigCount))
+            }
+
+            let aspect = height > 0 ? Double(width) / Double(height) : 1.5
+            let payload = EmbeddedSonyOpticsPayload(
+                distortionNodeCount: distCount,
+                distortionParams: distParams,
+                caNodeCount: caCount,
+                caRedParams: caRedParams,
+                caBlueParams: caBlueParams,
+                vignettingNodeCount: vigCount,
+                vignettingParams: vigParams,
+                focalLengthMM: exif.focalLengthMM,
+                fNumber: exif.fNumber,
+                sensorAspectRatio: aspect,
+                cropFactor: resolvedCropFactor
+            )
+            return payload.hasAnyCorrection ? payload : nil
+        }()
+
+        let demosaicUsed: DemosaicAlgorithm? = (forceProxy || isLosslessMS) ? nil : mapDemosaic(img.demosaic_used)
+
         return DecodedRAWFrame(
             sourceURL: sourceURL,
             backendUsed: .libraw,
@@ -374,8 +440,23 @@ public struct LibRawDecoder: ARWDecoderProtocol, Sendable {
             orientation: orientation,
             colorMatrices: colorMatrices,
             isLosslessMS: isLosslessMS,
-            exif: exif
+            exif: exif,
+            demosaicUsed: demosaicUsed,
+            embeddedSonyOptics: embeddedSonyOptics,
+            fullSensorDimensions: fullSensorDimensions,
+            cropFactor: resolvedCropFactor
         )
+    }
+
+    private static func mapDemosaic(_ raw: HDRLibRawDemosaicAlgorithm) -> DemosaicAlgorithm {
+        switch raw {
+        case HDR_LIBRAW_DEMOSAIC_AMAZE: return .amaze
+        case HDR_LIBRAW_DEMOSAIC_LMMSE: return .lmmse
+        case HDR_LIBRAW_DEMOSAIC_DCB:   return .dcb
+        case HDR_LIBRAW_DEMOSAIC_DHT:   return .dht
+        case HDR_LIBRAW_DEMOSAIC_AHD:   return .ahd
+        default: return .ahd
+        }
     }
 
     private static func sanitizeWBMultipliers(primary: [Double], fallback: [Double]) -> [Double] {

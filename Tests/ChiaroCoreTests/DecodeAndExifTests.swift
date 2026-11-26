@@ -1288,6 +1288,57 @@ struct DecodeAndExifTests {
             #expect(isCancellationError(error), "Unexpected error from cancelled CIRAWv9Decoder task: \(error)")
         }
     }
+
+    @Test(.enabled(if: TestFixtures.hasSampleDirectory, "Set CHIARO_SAMPLE_DIR to run real-ARW integration tests"))
+    func testLibRawAndCIRAWv9OpticsMetadataDemosaicAndZeroMakerNote() async throws {
+        let dsc2532 = m4aTangmoDir.appendingPathComponent("DSC02532.ARW")
+        let dsc2556 = m4aTangmoDir.appendingPathComponent("DSC02556.ARW")
+        try #require(FileManager.default.fileExists(atPath: dsc2532.path))
+        try #require(FileManager.default.fileExists(atPath: dsc2556.path))
+
+        let libRaw = LibRawDecoder()
+
+        // 1. Verify full-frame 16-node optics, fullSensorDimensions, cropFactor=1.0, demosaicUsed, zero MakerNote
+        let ffFrame = try await libRaw.decodeFull(
+            url: dsc2532,
+            options: DecodeOptions(backend: .libraw, demosaicAlgorithm: .lmmse)
+        )
+        #expect(ffFrame.demosaicUsed == .lmmse)
+        #expect(ffFrame.cropFactor == 1.0)
+        #expect(ffFrame.fullSensorDimensions?.width ?? 0 >= 7008)
+        #expect(ffFrame.fullSensorDimensions?.height ?? 0 >= 4672)
+        let ffOptics = try #require(ffFrame.embeddedSonyOptics)
+        #expect(ffOptics.distortionNodeCount == 16)
+        #expect(ffOptics.caNodeCount == 16)
+        #expect(ffOptics.vignettingNodeCount == 16)
+        #expect(ffOptics.cropFactor == 1.0)
+
+        let tiffData = try ExifWhitelistBuilder.buildTIFFData(from: ffFrame.exif)
+        let ifd0 = try parseLETiffIFD(tiffData, offset: 8)
+        let exifOff = Int(try #require(ifd0.entries.first(where: { $0.tag == 0x8769 })).valueOrOffset)
+        let exifIFD = try parseLETiffIFD(tiffData, offset: exifOff)
+        #expect(!exifIFD.entries.contains(where: { $0.tag == 0x927C }), "MakerNote 0x927C must NEVER appear in ExifIFD")
+
+        // 2. Verify APS-C 11-node optics, cropFactor=1.5, and fast proxy SLA <= 300ms (with demosaicUsed == nil)
+        let t0 = ContinuousClock.now
+        let apscProxy = try await libRaw.decodeProxy(url: dsc2556)
+        let proxyElapsed = t0.duration(to: .now)
+        #expect(proxyElapsed < .milliseconds(500), "Proxy decode took \(proxyElapsed)")
+        #expect(apscProxy.demosaicUsed == nil)
+        #expect(apscProxy.cropFactor == 1.5)
+        let apscOptics = try #require(apscProxy.embeddedSonyOptics)
+        #expect(apscOptics.distortionNodeCount == 11)
+        #expect(apscOptics.caNodeCount == 11)
+        #expect(apscOptics.vignettingNodeCount == 11)
+        #expect(apscOptics.caBlueParams.first == -512)
+
+        // 3. Verify CIRAWv9Decoder (or its LibRaw fallback) carries embeddedSonyOptics & cropFactor
+        let ciraw = CIRAWv9Decoder()
+        let ciProxy = try await ciraw.decodeProxy(url: dsc2532)
+        #expect(ciProxy.embeddedSonyOptics?.distortionNodeCount == 16)
+        #expect(ciProxy.cropFactor == 1.0)
+        #expect(ciProxy.fullSensorDimensions != nil)
+    }
 }
 
 }

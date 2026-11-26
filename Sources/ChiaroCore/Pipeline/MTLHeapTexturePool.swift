@@ -265,7 +265,7 @@ public final class MTLHeapTexturePool: @unchecked Sendable {
                     }
                 }
 
-                let preferredSlots = texSize > 128_000_000 ? 2 : (texSize > 32_000_000 ? 3 : 4)
+                let preferredSlots = texSize >= 48 * 1024 * 1024 ? 1 : (texSize >= 16 * 1024 * 1024 ? 2 : 4)
                 let maxAffordableSlots = max(1, maxPoolBytes / max(1, slotStride))
                 var slots = min(preferredSlots, min(maxAffordableSlots, slotsCap))
                 var requestedHeapSize = slotStride * slots

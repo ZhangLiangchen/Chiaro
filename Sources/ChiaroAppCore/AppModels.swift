@@ -10,14 +10,11 @@ public enum QueueItemStatus: Equatable, Sendable {
     case failed(String)
 
     public var label: String {
-        switch self {
-        case .idle: return "就绪"
-        case .queued: return "排队中"
-        case .decoding: return "解码中"
-        case .rendered: return "编码中"
-        case .completed: return "已完成"
-        case .failed: return "失败"
-        }
+        label(for: .zhHans)
+    }
+
+    public func label(for language: ResolvedLanguage) -> String {
+        ChiaroStrings.queueStatusLabel(self, lang: language)
     }
 }
 
@@ -28,6 +25,8 @@ public struct BatchItem: Identifiable, Sendable {
     public var status: QueueItemStatus = .idle
     public var lastFallbackReason: String?
     public var result: ExportResult?
+    public var hasSidecar: Bool = false
+    public var lastOpticsInfo: OpticsResolutionInfo?
 
     public init(id: UUID = UUID(), sourceURL: URL) {
         self.id = id
@@ -40,6 +39,10 @@ public enum InspectorEditScope: String, CaseIterable, Identifiable, Sendable {
     case perPhotoDelta = "单图微调"
 
     public var id: String { rawValue }
+
+    public func label(for language: ResolvedLanguage) -> String {
+        ChiaroStrings.scopeLabel(self, lang: language)
+    }
 }
 
 public enum CreativeLookOption: String, CaseIterable, Identifiable, Sendable {
@@ -93,6 +96,10 @@ public struct PreviewRenderSnapshot: Sendable {
     public let colorMatrices: CameraColorMatrices
     public let histogramBins: [UInt32]
     public let uniforms: EDRPreviewUniforms
+    public let opticsResolution: OpticsResolutionInfo
+    public let isoSpeed: Int?
+    public let lensModel: String?
+    public let cameraModel: String?
 
     public init(
         sourceURL: URL,
@@ -102,7 +109,11 @@ public struct PreviewRenderSnapshot: Sendable {
         backendUsed: RAWBackend,
         colorMatrices: CameraColorMatrices,
         histogramBins: [UInt32],
-        uniforms: EDRPreviewUniforms
+        uniforms: EDRPreviewUniforms,
+        opticsResolution: OpticsResolutionInfo = .none,
+        isoSpeed: Int? = nil,
+        lensModel: String? = nil,
+        cameraModel: String? = nil
     ) {
         self.sourceURL = sourceURL
         self.renderedFrame = renderedFrame
@@ -112,6 +123,10 @@ public struct PreviewRenderSnapshot: Sendable {
         self.colorMatrices = colorMatrices
         self.histogramBins = histogramBins
         self.uniforms = uniforms
+        self.opticsResolution = opticsResolution
+        self.isoSpeed = isoSpeed
+        self.lensModel = lensModel
+        self.cameraModel = cameraModel
     }
 }
 

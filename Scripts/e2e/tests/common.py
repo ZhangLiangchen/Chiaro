@@ -659,7 +659,11 @@ def assert_hlg_mp4_compliant(
 def assert_zero_gpl(ctx: RunContext, binary_path: Path, check_symbols: bool = True) -> Dict[str, Any]:
     res = check_zero_gpl_linkage(ctx.cfg.tools, binary_path, check_symbols=check_symbols)
     assert res["clean"], (
-        f"GPL/LGPL violation in {binary_path}: libs={res['forbidden_libs']}, syms={res['forbidden_symbols']}"
+        f"GPL-3.0-or-later license/linkage violation in {binary_path}: "
+        f"libs={res['forbidden_libs']}, syms={res['forbidden_symbols']}"
     )
-    ctx.note(f"License clean: {binary_path.name}")
+    ctx.note(f"License clean (GPL-3.0-or-later compatible): {binary_path.name}")
     return res
+
+
+assert_gpl3_compatible = assert_zero_gpl

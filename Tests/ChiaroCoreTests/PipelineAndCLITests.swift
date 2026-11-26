@@ -571,6 +571,177 @@ struct PipelineAndCLITests {
         #expect((partialRes.stdout + partialRes.stderr).contains("corrupt_trunc.ARW"))
         #expect(!hasLeftoverM5TmpFiles(in: partialOut))
     }
+
+    @Test(.enabled(if: TestFixtures.hasSampleDirectory, "Set CHIARO_SAMPLE_DIR to run real-ARW integration tests"))
+    func testCLIv11FlagsNDJSONAndSidecarPrecedence() async throws {
+        let cliURL = try #require(findBuiltCLIBinary(), "chiaro-cli binary not found in .build")
+        let dsc2532 = m5TangmoDir.appendingPathComponent("DSC02532.ARW")
+        try #require(FileManager.default.fileExists(atPath: dsc2532.path))
+
+        let workDir = try makeM5TempDir(prefix: "m4-cli-v11")
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let inDir = workDir.appendingPathComponent("in", isDirectory: true)
+        try FileManager.default.createDirectory(at: inDir, withIntermediateDirectories: true)
+        let arwURL = inDir.appendingPathComponent("DSC02532.ARW")
+        try FileManager.default.copyItem(at: dsc2532, to: arwURL)
+
+        let sidecarURL = ChiaroSidecar.sidecarURL(for: arwURL)
+        let sidecarJSON = """
+        {
+          "schemaVersion": 2,
+          "updatedAt": "2026-11-26T00:00:00Z",
+          "presetID": "xiaohongshu_jpg",
+          "demosaic": "lmmse"
+        }
+        """
+        try Data(sidecarJSON.utf8).write(to: sidecarURL)
+        let sidecarBefore = try Data(contentsOf: sidecarURL)
+
+        func parseNDJSON(_ stdout: String) throws -> [[String: Any]] {
+            try stdout
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.hasPrefix("{") }
+                .map { line in
+                    let obj = try JSONSerialization.jsonObject(with: Data(line.utf8))
+                    return try #require(obj as? [String: Any])
+                }
+        }
+
+        // 1. Omitted -p lets sidecar presetID ("xiaohongshu_jpg") and demosaic ("lmmse") apply
+        let outA = workDir.appendingPathComponent("out_sidecar_preset", isDirectory: true)
+        let resA = try runM5CLI(cliURL, arguments: [
+            arwURL.path,
+            "--json-progress",
+            "-o", outA.path,
+        ])
+        #expect(resA.status == 0, "CLI failed: \(resA.stderr)")
+        #expect(FileManager.default.fileExists(atPath: outA.appendingPathComponent("DSC02532_HDR.jpg").path))
+        #expect(!FileManager.default.fileExists(atPath: outA.appendingPathComponent("DSC02532_HDR.heic").path))
+
+        let eventsA = try parseNDJSON(resA.stdout)
+        let eventNamesA = eventsA.compactMap { $0["event"] as? String }
+        #expect(eventNamesA == ["batch_start", "job_started", "job_decoded", "job_rendered", "job_completed", "batch_summary"])
+        let jdA = try #require(eventsA.first { ($0["event"] as? String) == "job_decoded" })
+        #expect(jdA["demosaicUsed"] as? String == "lmmse")
+        #expect(jdA["opticsSource"] as? String == "embedded_arw")
+        #expect(((jdA["lensMatched"] as? String)?.isEmpty == false))
+        #expect(try Data(contentsOf: sidecarURL) == sidecarBefore)
+
+        // 2. Explicit -p and v1.1 flags beat sidecar
+        let outB = workDir.appendingPathComponent("out_cli_explicit", isDirectory: true)
+        let resB = try runM5CLI(cliURL, arguments: [
+            arwURL.path,
+            "-p", "apple_heic",
+            "--demosaic=dcb",
+            "--lens-correction=embedded",
+            "--lens-vignetting-strength=50",
+            "--tone-mapper=sigmoid",
+            "--clarity=25",
+            "--sharpness=30",
+            "--json-progress",
+            "-o", outB.path,
+        ])
+        #expect(resB.status == 0, "CLI failed: \(resB.stderr)")
+        #expect(FileManager.default.fileExists(atPath: outB.appendingPathComponent("DSC02532_HDR.heic").path))
+        let eventsB = try parseNDJSON(resB.stdout)
+        let jdB = try #require(eventsB.first { ($0["event"] as? String) == "job_decoded" })
+        #expect(jdB["demosaicUsed"] as? String == "dcb")
+        #expect(jdB["opticsSource"] as? String == "embedded_arw")
+
+        // 3. --use-sidecar --no-sidecar (last wins) + --backend ciraw9 keeps demosaicUsed key in NDJSON
+        let outC = workDir.appendingPathComponent("out_ciraw9_nosidecar", isDirectory: true)
+        let resC = try runM5CLI(cliURL, arguments: [
+            arwURL.path,
+            "--use-sidecar",
+            "--no-sidecar",
+            "--backend", "ciraw9",
+            "--json-progress",
+            "-o", outC.path,
+        ])
+        #expect(resC.status == 0, "CLI failed: \(resC.stderr)")
+        #expect(FileManager.default.fileExists(atPath: outC.appendingPathComponent("DSC02532_HDR.heic").path))
+        let eventsC = try parseNDJSON(resC.stdout)
+        let jdC = try #require(eventsC.first { ($0["event"] as? String) == "job_decoded" })
+        #expect(jdC.keys.contains("demosaicUsed"))
+        #expect(jdC.keys.contains("opticsSource"))
+        if (jdC["backend"] as? String) == "ciraw9" {
+            #expect(jdC["demosaicUsed"] is NSNull)
+        }
+        #expect(!hasLeftoverM5TmpFiles(in: inDir))
+        #expect(!hasLeftoverM5TmpFiles(in: outA))
+    }
+
+    @Test(.enabled(if: TestFixtures.hasSampleDirectory, "Set CHIARO_SAMPLE_DIR to run real-ARW integration tests"))
+    func testBoundedBatchPipelineDetailedSidecarSwitchAndFaultIsolation() async throws {
+        let dsc2532 = m5TangmoDir.appendingPathComponent("DSC02532.ARW")
+        let dsc2556 = m5TangmoDir.appendingPathComponent("DSC02556.ARW")
+        try #require(FileManager.default.fileExists(atPath: dsc2532.path))
+        try #require(FileManager.default.fileExists(atPath: dsc2556.path))
+
+        let workDir = try makeM5TempDir(prefix: "m4-pipeline-sidecar")
+        defer { try? FileManager.default.removeItem(at: workDir) }
+
+        let inDir = workDir.appendingPathComponent("in", isDirectory: true)
+        try FileManager.default.createDirectory(at: inDir, withIntermediateDirectories: true)
+        let validARW = inDir.appendingPathComponent("DSC02532.ARW")
+        let brokenSidecarARW = inDir.appendingPathComponent("DSC02556.ARW")
+        try FileManager.default.copyItem(at: dsc2532, to: validARW)
+        try FileManager.default.copyItem(at: dsc2556, to: brokenSidecarARW)
+
+        let validSidecar = ChiaroSidecar(
+            presetID: BuiltInPresetID.xiaohongshuJPG.rawValue,
+            demosaic: .lmmse,
+            optics: OpticalCorrectionParameters(enabled: true, source: .embedded)
+        )
+        try ChiaroSidecar.save(validSidecar, for: validARW)
+        try Data("{corrupt json".utf8).write(to: ChiaroSidecar.sidecarURL(for: brokenSidecarARW))
+
+        let outDir = workDir.appendingPathComponent("out", isDirectory: true)
+        let appleHEIC = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+        let jobs = [
+            ExportJob(
+                inputURL: validARW,
+                outputDirectory: outDir,
+                preset: appleHEIC,
+                namingTemplate: "{preset}_{name}.{ext}",
+                cliOverrides: CLIDevelopOverrides(presetExplicitlySpecified: false),
+                useSidecar: true
+            ),
+            ExportJob(
+                inputURL: brokenSidecarARW,
+                outputDirectory: outDir,
+                preset: appleHEIC,
+                namingTemplate: "{preset}_{name}.{ext}",
+                cliOverrides: CLIDevelopOverrides(presetExplicitlySpecified: false),
+                useSidecar: true
+            ),
+        ]
+
+        let capturedDecoded = OSAllocatedUnfairLock<[JobDecodedDetails]>(initialState: [])
+        let results = try await BoundedBatchPipeline().runDetailed(jobs: jobs) { event in
+            if case let .jobDecoded(details) = event {
+                capturedDecoded.withLock { $0.append(details) }
+            }
+        }
+
+        #expect(results.count == 2)
+        #expect(results[0].errorDescription == nil)
+        #expect(results[0].artifacts.count == 1)
+        #expect(results[0].artifacts[0].format == .jpeg)
+        #expect(results[0].artifacts[0].outputURL.lastPathComponent == "xiaohongshu_jpg_DSC02532.jpg")
+        #expect(results[0].artifacts[0].compliance?.passed == true)
+
+        #expect(results[1].errorDescription?.contains("Failed to load sidecar") == true)
+        #expect(results[1].artifacts.isEmpty)
+
+        let decodedList = capturedDecoded.withLock { $0 }
+        #expect(decodedList.count == 1)
+        #expect(decodedList[0].demosaicUsed == .lmmse)
+        #expect(decodedList[0].opticsSource == .embeddedARW)
+        #expect(decodedList[0].lensMatched?.isEmpty == false)
+    }
 }
 
 }

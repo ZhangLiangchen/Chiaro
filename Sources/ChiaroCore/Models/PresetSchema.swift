@@ -38,6 +38,7 @@ public enum GainMapResolution: String, Sendable, Codable, CaseIterable, Hashable
 
 public enum SDRToneMapper: String, Sendable, Codable, CaseIterable, Hashable {
     case agx
+    case sigmoid
     case neutralRational
     case openDRT
 }

@@ -2739,6 +2739,501 @@ func testNeutralRationalZeroEVRec2020BlueSweepContinuityAndCeiling() async throw
     }
 }
 
+// MARK: - 31. Sigmoid Tone Mapper Distinctness, Monotonicity & 0 EV Ceiling
+
+@Test
+func testSigmoidToneMapperDistinctnessMonotonicityAndCeiling() async throws {
+    let dev = try requireMetalDevice()
+    let engine = try MetalPipelineEngine(device: dev)
+
+    let w = 64, h = 4
+    var rgb = [Float](repeating: 0, count: w * h * 3)
+    for y in 0..<h {
+        for x in 0..<w {
+            let t = Float(x) / Float(w - 1)
+            let v = 0.05 + 12.0 * t
+            let i = (y * w + x) * 3
+            rgb[i + 0] = v
+            rgb[i + 1] = v * 0.75
+            rgb[i + 2] = v * 0.45
+        }
+    }
+
+    let frame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/sigmoid_ramp.arw"),
+        backendUsed: .libraw,
+        payload: .linearRGB16F(width: w, height: h, colorSpace: .linearRec2020, data: makeLinearRGB16FData(pixelsRGB: rgb)),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: CameraColorMatrices(),
+        isLosslessMS: false,
+        exif: WhitelistedExif()
+    )
+
+    var basePreset = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+    basePreset.midtoneAnchorP = 0.80
+    basePreset.targetHeadroomStops = 0.0
+    basePreset.sdrToneMapper = .sigmoid
+
+    let sigParams = EffectiveDevelopParams.resolve(preset: basePreset)
+    let sigRen = try await engine.render(frame: frame, params: sigParams, outputSpec: RenderOutputSpec())
+    let sigSDR = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(sigRen.sdrLinearTexture))
+
+    var prevR: Float = -1.0
+    for x in 0..<w {
+        let off = (2 * w + x) * 4
+        let r = sigSDR[off + 0], g = sigSDR[off + 1], b = sigSDR[off + 2]
+        #expect(r.isFinite && g.isFinite && b.isFinite)
+        #expect(max(r, max(g, b)) <= 1.001, "Sigmoid 0 EV exceeded ceiling at x=\(x)")
+        #expect(r >= prevR - 1e-3, "Sigmoid not monotonic at x=\(x): \(r) < \(prevR)")
+        prevR = r
+    }
+
+    for otherMapper in [SDRToneMapper.agx, .neutralRational, .openDRT] {
+        var otherPreset = basePreset
+        otherPreset.sdrToneMapper = otherMapper
+        let otherParams = EffectiveDevelopParams.resolve(preset: otherPreset)
+        let otherRen = try await engine.render(frame: frame, params: otherParams, outputSpec: RenderOutputSpec())
+        let otherSDR = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(otherRen.sdrLinearTexture))
+
+        var sqSum = 0.0
+        for i in stride(from: 0, to: sigSDR.count, by: 4) {
+            for c in 0..<3 {
+                let d = Double(sigSDR[i + c] - otherSDR[i + c])
+                sqSum += d * d
+            }
+        }
+        let rms = sqrt(sqSum / Double(w * h * 3))
+        #expect(rms > 0.003, "Sigmoid vs \(otherMapper) RMS diff too small: \(rms)")
+    }
+}
+
+// MARK: - 32. Clarity Monotonic Local Contrast, Halo-Free Step Edge & HDR Preservation
+
+@Test
+func testClarityMonotonicLocalContrastAndHaloFreeEdge() async throws {
+    let dev = try requireMetalDevice()
+    let engine = try MetalPipelineEngine(device: dev)
+
+    let w = 64, h = 64
+    var rgb = [Float](repeating: 0, count: w * h * 3)
+    for y in 0..<h {
+        for x in 0..<w {
+            let i = (y * w + x) * 3
+            if x >= 48 {
+                // High-contrast 4-EV step edge & HDR > 1.0 region
+                rgb[i + 0] = 3.2
+                rgb[i + 1] = 3.2
+                rgb[i + 2] = 3.2
+            } else {
+                // Textured midtone checkerboard (local contrast region)
+                let delta: Float = ((x / 2 + y / 2) % 2 == 0) ? 0.04 : -0.04
+                let v = 0.25 + delta
+                rgb[i + 0] = v
+                rgb[i + 1] = v
+                rgb[i + 2] = v
+            }
+        }
+    }
+
+    let frame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/clarity_test.arw"),
+        backendUsed: .libraw,
+        payload: .linearRGB16F(width: w, height: h, colorSpace: .linearRec2020, data: makeLinearRGB16FData(pixelsRGB: rgb)),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: CameraColorMatrices(),
+        isLosslessMS: false,
+        exif: WhitelistedExif()
+    )
+
+    let preset = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+    func localContrastAndEdgeStats(clarity: Double) async throws -> (contrast: Double, edgePeakHDR: Float, allFinite: Bool) {
+        let delta = PerPhotoDelta(clarityOverride: clarity)
+        let params = EffectiveDevelopParams.resolve(preset: preset, delta: delta)
+        let ren = try await engine.render(frame: frame, params: params, outputSpec: RenderOutputSpec())
+        let hdr = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(ren.hdrLinearTexture))
+        let allFinite = hdr.allSatisfy(\.isFinite)
+
+        var vals: [Double] = []
+        for y in 16..<40 {
+            for x in 12..<36 {
+                let off = (y * w + x) * 4
+                vals.append(Double(hdr[off + 1]))
+            }
+        }
+        let mean = vals.reduce(0, +) / Double(vals.count)
+        let variance = vals.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(vals.count)
+        let peakHDR = hdr[(32 * w + 56) * 4 + 1]
+        return (sqrt(variance), peakHDR, allFinite)
+    }
+
+    let sNeg = try await localContrastAndEdgeStats(clarity: -60)
+    let sZero = try await localContrastAndEdgeStats(clarity: 0)
+    let sPos = try await localContrastAndEdgeStats(clarity: 60)
+
+    #expect(sNeg.allFinite && sZero.allFinite && sPos.allFinite)
+    #expect(sNeg.contrast < sZero.contrast, "Expected clarity -60 contrast (\(sNeg.contrast)) < 0 (\(sZero.contrast))")
+    #expect(sZero.contrast < sPos.contrast, "Expected clarity 0 contrast (\(sZero.contrast)) < +60 (\(sPos.contrast))")
+    #expect(sPos.edgePeakHDR > 1.5, "Clarity clipped HDR highlight > 1.5: \(sPos.edgePeakHDR)")
+}
+
+// MARK: - 33. Optical Sharpness Acutance & Dark Flat Noise Suppression
+
+@Test
+func testOpticalSharpnessAcutanceAndDarkNoiseSuppression() async throws {
+    let dev = try requireMetalDevice()
+    let engine = try MetalPipelineEngine(device: dev)
+
+    let w = 64, h = 64
+    var rgb = [Float](repeating: 0, count: w * h * 3)
+    for y in 0..<h {
+        for x in 0..<w {
+            let i = (y * w + x) * 3
+            if y < 32 {
+                // Soft blurred edge transition around x = 32 + HDR on right
+                let t = Float(min(max(Double(x - 29) / 6.0, 0.0), 1.0))
+                let v = 0.15 + 2.1 * t
+                rgb[i + 0] = v
+                rgb[i + 1] = v
+                rgb[i + 2] = v
+            } else {
+                // Dark flat noisy shadow patch (Y ~ 0.015 with small sensor read noise)
+                let jitterInt = ((x * 73 + y * 151) % 7) - 3
+                let jitter = Float(jitterInt) * 0.001
+                let v = max(0.015 + jitter, 0.0)
+                rgb[i + 0] = v
+                rgb[i + 1] = v
+                rgb[i + 2] = v
+            }
+        }
+    }
+
+    let frame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/sharpness_test.arw"),
+        backendUsed: .libraw,
+        payload: .linearRGB16F(width: w, height: h, colorSpace: .linearRec2020, data: makeLinearRGB16FData(pixelsRGB: rgb)),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: CameraColorMatrices(),
+        isLosslessMS: false,
+        exif: WhitelistedExif()
+    )
+
+    let preset = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+    func measureSharpness(_ val: Double) async throws -> (edgeGradient: Double, shadowVar: Double, peakHDR: Float, allFinite: Bool) {
+        let params = EffectiveDevelopParams.resolve(preset: preset, delta: PerPhotoDelta(opticalSharpnessOverride: val))
+        let ren = try await engine.render(frame: frame, params: params, outputSpec: RenderOutputSpec())
+        let hdr = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(ren.hdrLinearTexture))
+        let allFinite = hdr.allSatisfy(\.isFinite)
+
+        var gradSum = 0.0
+        for y in 8..<24 {
+            for x in 28..<36 {
+                let g0 = Double(hdr[(y * w + x) * 4 + 1])
+                let g1 = Double(hdr[(y * w + x + 1) * 4 + 1])
+                gradSum += abs(g1 - g0)
+            }
+        }
+
+        var shadowVals: [Double] = []
+        for y in 40..<58 {
+            for x in 10..<54 {
+                shadowVals.append(Double(hdr[(y * w + x) * 4 + 1]))
+            }
+        }
+        let sMean = shadowVals.reduce(0, +) / Double(shadowVals.count)
+        let sVar = shadowVals.reduce(0) { $0 + ($1 - sMean) * ($1 - sMean) } / Double(shadowVals.count)
+        let peakHDR = hdr[(16 * w + 50) * 4 + 1]
+        return (gradSum, sVar, peakHDR, allFinite)
+    }
+
+    let m0 = try await measureSharpness(0)
+    let m80 = try await measureSharpness(80)
+
+    #expect(m0.allFinite && m80.allFinite)
+    #expect(m80.edgeGradient > m0.edgeGradient, "OpticalSharpness=80 gradient (\(m80.edgeGradient)) must exceed 0 (\(m0.edgeGradient))")
+    #expect(m80.shadowVar <= max(m0.shadowVar * 2.0, 1e-8), "Dark flat shadow noise amplified > 2x")
+    #expect(m80.peakHDR > 1.5, "OpticalSharpness clipped HDR highlight: \(m80.peakHDR)")
+}
+
+// MARK: - 34. Upgraded Opposed Inpaint Night Magenta Trap
+
+@Test
+func testUpgradedOpposedInpaintNightMagentaTrap() async throws {
+    let dev = try requireMetalDevice()
+    let engine = try MetalPipelineEngine(device: dev)
+
+    let w = 48, h = 48
+    var bayer = [UInt16](repeating: 600, count: w * h)
+    // Night scene: dark surround (raw ~600), warm neutral lamp border (raw ~13500),
+    // clipped lamp core (G clipped at 15360, R=13500, B=11000 with WB [2.5, 1.0, 1.6, 1.0])
+    for y in 0..<h {
+        for x in 0..<w {
+            let isCore = (x >= 20 && x < 28 && y >= 20 && y < 28)
+            let isBorder = !isCore && (x >= 16 && x < 32 && y >= 16 && y < 32)
+            let isR = (y & 1 == 0) && (x & 1 == 0)
+            let isB = (y & 1 == 1) && (x & 1 == 1)
+            let val: UInt16
+            if isCore {
+                val = isR ? 11000 : (isB ? 13800 : 15360)
+            } else if isBorder {
+                val = isR ? 8000 : (isB ? 12000 : 14000)
+            } else {
+                val = 600
+            }
+            bayer[y * w + x] = val
+        }
+    }
+
+    let frame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/night_magenta_trap.arw"),
+        backendUsed: .libraw,
+        payload: .rawBayer(width: w, height: h, bitsPerSample: 14, cfa: .rggb, data: bayer.withUnsafeBytes { Data($0) }),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: CameraColorMatrices(
+            camXYZ: [
+                +3.2404542, -1.5371385, -0.4985314,
+                -0.9692660, +1.8760108, +0.0415560,
+                +0.0556434, -0.2040259, +1.0572252,
+            ],
+            forwardMatrix: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+            wbMultipliers: [2.5, 1.0, 1.6, 1.0],
+            asShotWBApplied: false
+        ),
+        isLosslessMS: false,
+        exif: WhitelistedExif()
+    )
+
+    let cal = RAWLevelCalibration(blackLevel: [512, 512, 512, 512], whiteLevel: 15360)
+    let preset = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+    let params = EffectiveDevelopParams.resolve(preset: preset, delta: PerPhotoDelta(highlightReconstructionOverride: .opposedInpaint))
+    let ren = try await engine.render(frame: frame, params: params, outputSpec: RenderOutputSpec(), rawCalibration: cal)
+    let hdr = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(ren.hdrLinearTexture))
+    let off = (24 * w + 24) * 4
+    let r = hdr[off + 0], g = hdr[off + 1], b = hdr[off + 2]
+    #expect(r.isFinite && g.isFinite && b.isFinite)
+    #expect(g > 1.0, "Upgraded opposedInpaint failed to recover clipped green > 1.0: (\(r), \(g), \(b))")
+    let magentaExcess = 0.5 * (r + b) - g
+    #expect(magentaExcess < 0.25, "Highlight exhibited magenta cast (\(r), \(g), \(b))")
+}
+
+// MARK: - 35. MetalPipelineEngine Stage Ordering & CIRAWv9 Denoise Bypass
+
+@Test
+func testMetalPipelineStageOrderingAndCIRAWv9DenoiseBypass() async throws {
+    let dev = try requireMetalDevice()
+
+    final class SpyRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var log: [String] = []
+        func record(_ event: String) {
+            lock.lock(); log.append(event); lock.unlock()
+        }
+        func snapshot() -> [String] {
+            lock.lock(); defer { lock.unlock() }; return log
+        }
+        func reset() {
+            lock.lock(); log.removeAll(); lock.unlock()
+        }
+    }
+
+    struct SpyDenoise: LinearDenoiseStage {
+        let recorder: SpyRecorder
+        func denoise(
+            inputTexture: any MTLTexture,
+            iso: Int?,
+            noiseProfile: SensorNoiseProfile?,
+            params: DenoiseParameters,
+            commandQueue: any MTLCommandQueue
+        ) async throws -> any MTLTexture {
+            recorder.record("denoise")
+            return inputTexture
+        }
+    }
+
+    struct SpyOptics: OpticalCorrectionStage {
+        let recorder: SpyRecorder
+        func resolveOptics(frame: DecodedRAWFrame, params: OpticalCorrectionParameters) -> OpticsResolutionInfo {
+            .none
+        }
+        func applyCorrection(
+            inputTexture: any MTLTexture,
+            frame: DecodedRAWFrame,
+            params: OpticalCorrectionParameters,
+            commandQueue: any MTLCommandQueue
+        ) async throws -> (texture: any MTLTexture, resolution: OpticsResolutionInfo) {
+            recorder.record("optics")
+            return (inputTexture, .none)
+        }
+    }
+
+    struct SpyColorGrading: ColorGradingStage {
+        let recorder: SpyRecorder
+        func apply(
+            inputTexture: any MTLTexture,
+            params: AIColorGradingParameters?,
+            commandQueue: any MTLCommandQueue
+        ) async throws -> any MTLTexture {
+            recorder.record("colorGrading")
+            return inputTexture
+        }
+    }
+
+    let recorder = SpyRecorder()
+    let engine = try MetalPipelineEngine(
+        device: dev,
+        denoiseStage: SpyDenoise(recorder: recorder),
+        opticsStage: SpyOptics(recorder: recorder),
+        colorGradingStage: SpyColorGrading(recorder: recorder)
+    )
+
+    let w = 16, h = 16
+    let rgbData = makeLinearRGB16FData(pixelsRGB: [Float](repeating: 0.25, count: w * h * 3))
+    let preset = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+    let params = EffectiveDevelopParams.resolve(preset: preset)
+
+    // 1. LibRaw frame: strict order denoise -> optics -> colorGrading
+    let librawFrame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/order_libraw.arw"),
+        backendUsed: .libraw,
+        payload: .linearRGB16F(width: w, height: h, colorSpace: .linearRec2020, data: rgbData),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: CameraColorMatrices(),
+        isLosslessMS: false,
+        exif: WhitelistedExif(make: "SONY", model: "ILCE-7CM2", isoSpeedRatings: 6400)
+    )
+    _ = try await engine.render(frame: librawFrame, params: params, outputSpec: RenderOutputSpec())
+    #expect(recorder.snapshot() == ["denoise", "optics", "colorGrading"])
+
+    // 2. CIRAWv9 frame with preferANE=true: LinearDenoiseStage MUST be bypassed
+    recorder.reset()
+    let cirawFrame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/order_ciraw.arw"),
+        backendUsed: .ciraw9,
+        payload: .linearRGB16F(width: w, height: h, colorSpace: .extendedLinearDisplayP3, data: rgbData),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: CameraColorMatrices(),
+        isLosslessMS: false,
+        exif: WhitelistedExif(make: "SONY", model: "ILCE-7CM2", isoSpeedRatings: 6400)
+    )
+    _ = try await engine.render(frame: cirawFrame, params: params, outputSpec: RenderOutputSpec())
+    #expect(recorder.snapshot() == ["optics", "colorGrading"])
+
+    // 3. CIRAWv9 frame with preferANE=false: LinearDenoiseStage runs before optics
+    recorder.reset()
+    var forcedDenoiseParams = params
+    forcedDenoiseParams.denoise.preferANE = false
+    _ = try await engine.render(frame: cirawFrame, params: forcedDenoiseParams, outputSpec: RenderOutputSpec())
+    #expect(recorder.snapshot() == ["denoise", "optics", "colorGrading"])
+}
+
+// MARK: - 34. Regression: Opposed Inpaint R+B-Clipped / G-Unclipped Magenta Elimination
+
+@Test
+func testOpposedInpaintRBClippedMagentaElimination() async throws {
+    let dev = try requireMetalDevice()
+    let engine = try MetalPipelineEngine(device: dev)
+    let preset = try PresetLoader.loadBuiltIn(id: .appleHEIC)
+    let params = EffectiveDevelopParams.resolve(
+        preset: preset,
+        delta: PerPhotoDelta(highlightReconstructionOverride: .opposedInpaint)
+    )
+
+    let sonyCamXYZ: [Double] = [
+        0.746000, -0.236500, -0.058800,
+        -0.568700, 1.344200, 0.247400,
+        -0.062400, 0.115600, 0.658400,
+    ]
+    let wb = [2.5, 1.0, 1.8, 1.0]
+    let dmax = max(wb[0], max(wb[1], wb[2]))
+    let w = 48, h = 48
+
+    // 1. .rawBayer: Surround is unclipped neutral ~0.35; inner core has R+B clipped at 16383 and G unclipped at 7000
+    var bayer = [UInt16](repeating: 512, count: w * h)
+    for y in 0..<h {
+        for x in 0..<w {
+            let inCore = (x >= 16 && x < 32 && y >= 16 && y < 32)
+            let isR = (y & 1 == 0) && (x & 1 == 0)
+            let isB = (y & 1 == 1) && (x & 1 == 1)
+            if inCore {
+                bayer[y * w + x] = (isR || isB) ? 16383 : 7000
+            } else {
+                // Unclipped neutral surround (wb * raw_norm = 0.35)
+                if isR {
+                    bayer[y * w + x] = UInt16((512.0 + (0.35 / wb[0]) * (16383.0 - 512.0)).rounded())
+                } else if isB {
+                    bayer[y * w + x] = UInt16((512.0 + (0.35 / wb[2]) * (16383.0 - 512.0)).rounded())
+                } else {
+                    bayer[y * w + x] = UInt16((512.0 + 0.35 * (16383.0 - 512.0)).rounded())
+                }
+            }
+        }
+    }
+    let cal = RAWLevelCalibration(blackLevel: [512, 512, 512, 512], whiteLevel: 16383)
+    let matrices = CameraColorMatrices(
+        camXYZ: sonyCamXYZ,
+        forwardMatrix: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+        wbMultipliers: wb,
+        asShotWBApplied: false
+    )
+    let bayerFrame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/rb_clipped_bayer.arw"),
+        backendUsed: .libraw,
+        payload: .rawBayer(width: w, height: h, bitsPerSample: 14, cfa: .rggb, data: bayer.withUnsafeBytes { Data($0) }),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: matrices,
+        isLosslessMS: false,
+        exif: WhitelistedExif()
+    )
+    let renBayer = try await engine.render(frame: bayerFrame, params: params, outputSpec: RenderOutputSpec(), rawCalibration: cal)
+    let pxBayer = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(renBayer.hdrLinearTexture))
+    let off = (24 * w + 24) * 4
+    let rB = pxBayer[off + 0], gB = pxBayer[off + 1], bB = pxBayer[off + 2]
+    #expect(rB.isFinite && gB.isFinite && bB.isFinite)
+    #expect(gB > 0.05)
+    #expect(max(rB, bB) / max(gB, 1e-5) < 1.5, "R+B-clipped .rawBayer turned magenta: R=\(rB) G=\(gB) B=\(bB)")
+
+    // 2. .linearRGB16U cameraNative equivalent (scale_colors() clipped R & B at 1.0, unclipped G at (7000-512)/(16383-512)/dmax)
+    var rgb16 = [UInt16](repeating: 0, count: w * h * 3)
+    let gCoreNorm = (7000.0 - 512.0) / (16383.0 - 512.0)
+    for y in 0..<h {
+        for x in 0..<w {
+            let inCore = (x >= 16 && x < 32 && y >= 16 && y < 32)
+            let i = (y * w + x) * 3
+            if inCore {
+                rgb16[i + 0] = UInt16(((1.0 * wb[0] / dmax) * 65535.0).rounded())
+                rgb16[i + 1] = UInt16(((gCoreNorm * wb[1] / dmax) * 65535.0).rounded())
+                rgb16[i + 2] = UInt16(((1.0 * wb[2] / dmax) * 65535.0).rounded())
+            } else {
+                rgb16[i + 0] = UInt16(((0.35 / dmax) * 65535.0).rounded())
+                rgb16[i + 1] = UInt16(((0.35 / dmax) * 65535.0).rounded())
+                rgb16[i + 2] = UInt16(((0.35 / dmax) * 65535.0).rounded())
+            }
+        }
+    }
+    let rgbFrame = DecodedRAWFrame(
+        sourceURL: URL(fileURLWithPath: "/tmp/rb_clipped_rgb16.arw"),
+        backendUsed: .libraw,
+        payload: .linearRGB16U(width: w, height: h, colorSpace: .cameraNative, data: rgb16.withUnsafeBytes { Data($0) }),
+        visibleCrop: SensorCropRect(x: 0, y: 0, width: w, height: h),
+        orientation: 1,
+        colorMatrices: matrices,
+        isLosslessMS: false,
+        exif: WhitelistedExif()
+    )
+    let renRGB = try await engine.render(frame: rgbFrame, params: params, outputSpec: RenderOutputSpec())
+    let pxRGB = try readRGBA16FPixels(device: dev, commandQueue: engine.commandQueue, texture: try #require(renRGB.hdrLinearTexture))
+    let rU = pxRGB[off + 0], gU = pxRGB[off + 1], bU = pxRGB[off + 2]
+    #expect(rU.isFinite && gU.isFinite && bU.isFinite)
+    #expect(gU > 0.05)
+    #expect(max(rU, bU) / max(gU, 1e-5) < 1.5, "R+B-clipped .linearRGB16U turned magenta: R=\(rU) G=\(gU) B=\(bU)")
+}
+
 }
 
 }

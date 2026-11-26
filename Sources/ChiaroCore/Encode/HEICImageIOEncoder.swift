@@ -69,78 +69,80 @@ public struct HEICImageIOEncoder: HEICEncoderProtocol, Sendable {
             gmMeta = locked.metadata
         }
 
-        let targetBitDepth = preset.effectiveBitDepth(for: .heic)
-        let baseImage = try normalizeBaseCGImage(
-            frame.sdrCGImage,
-            targetBitDepth: targetBitDepth,
-            baseColorSpace: frame.baseColorSpace
-        )
+        try autoreleasepool {
+            let targetBitDepth = preset.effectiveBitDepth(for: .heic)
+            let baseImage = try normalizeBaseCGImage(
+                frame.sdrCGImage,
+                targetBitDepth: targetBitDepth,
+                baseColorSpace: frame.baseColorSpace
+            )
 
-        var imageProps = ExifWhitelistBuilder.buildImageIODictionary(
-            from: frame.exif,
-            customRenderedHDR: preset.compatOptions.writeCustomRenderedHDR
-        )
-        let quality = preset.quality.isFinite ? min(max(preset.quality, 0.05), 1.0) : 0.90
-        imageProps[kCGImageDestinationLossyCompressionQuality] = quality
+            var imageProps = ExifWhitelistBuilder.buildImageIODictionary(
+                from: frame.exif,
+                customRenderedHDR: preset.compatOptions.writeCustomRenderedHDR
+            )
+            let quality = preset.quality.isFinite ? min(max(preset.quality, 0.05), 1.0) : 0.90
+            imageProps[kCGImageDestinationLossyCompressionQuality] = quality
 
-        let isoAuxInfo = try buildISOGainMapAuxiliaryInfo(buffer: gmBuffer, metadata: gmMeta)
-        let legacyAuxInfo: [CFString: Any]? = preset.compatOptions.writeLegacyAppleHDRGainMap
-            ? try buildLegacyAppleGainMapAuxiliaryInfo(buffer: gmBuffer, metadata: gmMeta)
-            : nil
+            let isoAuxInfo = try buildISOGainMapAuxiliaryInfo(buffer: gmBuffer, metadata: gmMeta)
+            let legacyAuxInfo: [CFString: Any]? = preset.compatOptions.writeLegacyAppleHDRGainMap
+                ? try buildLegacyAppleGainMapAuxiliaryInfo(buffer: gmBuffer, metadata: gmMeta)
+                : nil
 
-        try Task.checkCancellation()
+            try Task.checkCancellation()
 
-        let parentDir = outputURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
-        let tmpURL = parentDir.appendingPathComponent(".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp")
+            let parentDir = outputURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            let tmpURL = parentDir.appendingPathComponent(".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp")
 
-        var renamed = false
-        defer {
-            if !renamed {
-                try? FileManager.default.removeItem(at: tmpURL)
+            var renamed = false
+            defer {
+                if !renamed {
+                    try? FileManager.default.removeItem(at: tmpURL)
+                }
             }
-        }
 
-        guard let destination = CGImageDestinationCreateWithURL(
-            tmpURL as CFURL,
-            UTType.heic.identifier as CFString,
-            1,
-            nil
-        ) else {
-            throw HEICEncodeError.destinationCreationFailed(outputURL)
-        }
+            guard let destination = CGImageDestinationCreateWithURL(
+                tmpURL as CFURL,
+                UTType.heic.identifier as CFString,
+                1,
+                nil
+            ) else {
+                throw HEICEncodeError.destinationCreationFailed(outputURL)
+            }
 
-        CGImageDestinationAddImage(destination, baseImage, imageProps as CFDictionary)
-        CGImageDestinationAddAuxiliaryDataInfo(
-            destination,
-            kCGImageAuxiliaryDataTypeISOGainMap,
-            isoAuxInfo as CFDictionary
-        )
-        if let legacyAuxInfo {
+            CGImageDestinationAddImage(destination, baseImage, imageProps as CFDictionary)
             CGImageDestinationAddAuxiliaryDataInfo(
                 destination,
-                kCGImageAuxiliaryDataTypeHDRGainMap,
-                legacyAuxInfo as CFDictionary
+                kCGImageAuxiliaryDataTypeISOGainMap,
+                isoAuxInfo as CFDictionary
             )
-        }
-
-        guard CGImageDestinationFinalize(destination) else {
-            throw HEICEncodeError.imageFinalizationFailed(outputURL)
-        }
-
-        let renameResult = tmpURL.withUnsafeFileSystemRepresentation { srcPath in
-            outputURL.withUnsafeFileSystemRepresentation { dstPath in
-                guard let srcPath, let dstPath else {
-                    errno = EINVAL
-                    return Int32(-1)
-                }
-                return Darwin.rename(srcPath, dstPath)
+            if let legacyAuxInfo {
+                CGImageDestinationAddAuxiliaryDataInfo(
+                    destination,
+                    kCGImageAuxiliaryDataTypeHDRGainMap,
+                    legacyAuxInfo as CFDictionary
+                )
             }
+
+            guard CGImageDestinationFinalize(destination) else {
+                throw HEICEncodeError.imageFinalizationFailed(outputURL)
+            }
+
+            let renameResult = tmpURL.withUnsafeFileSystemRepresentation { srcPath in
+                outputURL.withUnsafeFileSystemRepresentation { dstPath in
+                    guard let srcPath, let dstPath else {
+                        errno = EINVAL
+                        return Int32(-1)
+                    }
+                    return Darwin.rename(srcPath, dstPath)
+                }
+            }
+            guard renameResult == 0 else {
+                throw HEICEncodeError.atomicRenameFailed(errno: errno, path: outputURL.path)
+            }
+            renamed = true
         }
-        guard renameResult == 0 else {
-            throw HEICEncodeError.atomicRenameFailed(errno: errno, path: outputURL.path)
-        }
-        renamed = true
 
         let attrs = try FileManager.default.attributesOfItem(atPath: outputURL.path)
         let fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? 0

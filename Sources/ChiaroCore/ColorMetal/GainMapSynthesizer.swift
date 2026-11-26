@@ -296,6 +296,27 @@ public final class GainMapSynthesizer: @unchecked Sendable {
                     for c in 0..<channelCount { gMin[c] = 0.0; gMax[c] = maxStops }
                 }
             } else {
+                func assignUniformBounds(channel c: Int, minVal: Double, maxVal: Double) {
+                    if minVal.isFinite && maxVal.isFinite {
+                        if minVal >= 0.0 && maxVal >= 1e-5 {
+                            gMin[c] = 0.0
+                            gMax[c] = maxVal
+                            return
+                        } else if maxVal <= 0.0 && minVal <= -1e-5 {
+                            gMin[c] = minVal
+                            gMax[c] = 0.0
+                            return
+                        } else if abs(maxVal) >= 1e-5 && abs(minVal) >= 1e-5 {
+                            let val = (maxVal >= 0.0) ? maxVal : minVal
+                            gMin[c] = min(0.0, val)
+                            gMax[c] = max(0.0, val)
+                            return
+                        }
+                    }
+                    gMin[c] = 0.0
+                    gMax[c] = 0.0
+                }
+
                 let anySpan = (0..<channelCount).contains { (rawMax[$0] - rawMin[$0]) >= 1e-5 }
                 if anySpan {
                     let binCount = 4096
@@ -344,8 +365,7 @@ public final class GainMapSynthesizer: @unchecked Sendable {
                     for c in 0..<channelCount {
                         let span = Double(rawMax[c] - rawMin[c])
                         if span < 1e-5 {
-                            gMin[c] = 0.0
-                            gMax[c] = 0.0
+                            assignUniformBounds(channel: c, minVal: Double(rawMin[c]), maxVal: Double(rawMax[c]))
                             continue
                         }
                         let chOffset = c * binCount
@@ -368,8 +388,7 @@ public final class GainMapSynthesizer: @unchecked Sendable {
                         var mn = Double(rawMin[c]) + (Double(lowBin) / Double(binCount)) * span
                         let mx = Double(rawMin[c]) + (Double(highBin + 1) / Double(binCount)) * span
                         if mx - mn < 1e-5 {
-                            gMin[c] = 0.0
-                            gMax[c] = 0.0
+                            assignUniformBounds(channel: c, minVal: mn, maxVal: mx)
                             continue
                         }
 
@@ -396,6 +415,10 @@ public final class GainMapSynthesizer: @unchecked Sendable {
 
                         gMin[c] = mn
                         gMax[c] = mx
+                    }
+                } else {
+                    for c in 0..<channelCount {
+                        assignUniformBounds(channel: c, minVal: Double(rawMin[c]), maxVal: Double(rawMax[c]))
                     }
                 }
             }

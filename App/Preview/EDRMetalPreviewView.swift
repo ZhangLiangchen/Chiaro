@@ -80,7 +80,7 @@ struct EDRMetalPreviewView: NSViewRepresentable {
         view.preferredFramesPerSecond = 120
         view.enableSetNeedsDisplay = true
         view.isPaused = true
-        view.clearColor = MTLClearColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1.0)
+        view.clearColor = LiquidGlassSystem.neutralCanvasClearColor
         view.delegate = context.coordinator
         view.onScreenMaxEDRChanged = onScreenMaxEDRChanged
 
@@ -245,7 +245,7 @@ struct EDRMetalPreviewView: NSViewRepresentable {
             }
 
             rpd.colorAttachments[0].loadAction = .clear
-            rpd.colorAttachments[0].clearColor = MTLClearColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 1.0)
+            rpd.colorAttachments[0].clearColor = LiquidGlassSystem.neutralCanvasClearColor
 
             guard let enc = cb.makeRenderCommandEncoder(descriptor: rpd) else {
                 return

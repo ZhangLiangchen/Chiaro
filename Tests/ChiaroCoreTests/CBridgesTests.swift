@@ -1,6 +1,8 @@
+import CLensfunBridge
 import CLibAVIFBridge
 import CLibRawBridge
 import CUltraHDRBridge
+@testable import ChiaroCore
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -252,6 +254,7 @@ func testCLibRawRealTangmoARWModesAndExifWhitelist() throws {
     #expect(bayerImg.cam_mul.0 > 1.0)
     #expect(bayerImg.data_bytes == 7008 * 4672 * 2)
     #expect(bayerImg.rgb16_data != nil)
+    #expect(bayerImg.demosaic_used == HDR_LIBRAW_DEMOSAIC_NONE)
 
     // EXIF whitelist checks + verify zero MakerNote property on struct
     #expect(cStringOrNil(bayerImg.exif.make) == "SONY")
@@ -300,6 +303,7 @@ func testCLibRawRealTangmoARWModesAndExifWhitelist() throws {
     #expect(proxyImg.bits_per_sample == 16)
     #expect(proxyImg.data_bytes == 3504 * 2336 * 3 * 2)
     #expect(proxyImg.orientation == 1)
+    #expect(proxyImg.demosaic_used == HDR_LIBRAW_DEMOSAIC_NONE)
 
     // 4. DSC02540.ARW (33MP Rotate 270 CW -> orientation 8, raw sensor geometry preserved)
     var rotImg = HDRLibRawImage()
@@ -338,6 +342,7 @@ func testCLibRawRealTangmoARWModesAndExifWhitelist() throws {
     #expect(apscProxy.width == 2304)
     #expect(apscProxy.height == 1536)
     #expect(apscProxy.data_bytes == 2304 * 1536 * 3 * 2)
+    #expect(apscProxy.demosaic_used == HDR_LIBRAW_DEMOSAIC_NONE)
 }
 
 @Test(.enabled(if: TestFixtures.hasSampleDirectory, "Set CHIARO_SAMPLE_DIR to run real-ARW integration tests"))
@@ -1416,6 +1421,223 @@ func testCLibAVIFLosslessAOMWithTuneIQAndMonoFallback() {
     #expect(stMixed == HDR_AVIF_OK)
     #expect(outMixed.actual_codec == HDR_AVIF_CODEC_AOM)
     #expect(outMixed.size > 0)
+}
+
+@Test
+func testCLensfunBridgeLoadDBSonyFallbackCustomXMLAndInvalidLibRawArg() throws {
+    let dbURL = try #require(PresetLoader.resourceBundle.url(forResource: "LensfunDB", withExtension: nil))
+    let tmpUserDir = try makeTempDirectory(prefix: "lensfun-user-db")
+    defer { try? FileManager.default.removeItem(at: tmpUserDir) }
+
+    let handle = try #require(
+        dbURL.path.withCString { dbPtr in
+            chiaro_lensfun_create(dbPtr, nil)
+        }
+    )
+    defer { chiaro_lensfun_destroy(handle) }
+
+    var info = ChiaroLensfunLibraryInfo()
+    #expect(chiaro_lensfun_get_info(handle, &info) == 0)
+    #expect(info.loaded_primary_db == 1)
+    #expect(info.loaded_user_db == 0)
+    #expect(info.db_camera_count >= 900)
+    #expect(info.db_lens_count >= 1200)
+
+    // Verify ILCE-7CM2 Sony E-mount FF (1.0x) and APS-C (1.5x) fallback
+    func matchSony(lensModel: String, crop: Float) -> (Int32, ChiaroLensfunMatchResult) {
+        var res = ChiaroLensfunMatchResult()
+        let rc = "SONY".withCString { mk in
+            "ILCE-7CM2".withCString { md in
+                lensModel.withCString { lm in
+                    var q = ChiaroLensfunMatchQuery(
+                        camera_make: mk,
+                        camera_model: md,
+                        lens_make: nil,
+                        lens_model: lm,
+                        camera_override: nil,
+                        lens_override: nil,
+                        crop_factor: crop
+                    )
+                    return chiaro_lensfun_match(handle, &q, &res)
+                }
+            }
+        }
+        return (rc, res)
+    }
+
+    let (rcFF, resFF) = matchSony(lensModel: "FE 50mm F1.8", crop: 1.0)
+    #expect(rcFF == 0)
+    #expect(resFF.matched == 1)
+    #expect(resFF.is_sony_e_fallback == 1)
+    #expect(abs(resFF.resolved_crop_factor - 1.0) < 0.05)
+
+    let (rcAPSC, resAPSC) = matchSony(lensModel: "E 18-135mm F3.5-5.6 OSS", crop: 1.5)
+    #expect(rcAPSC == 0)
+    #expect(resAPSC.matched == 1)
+    #expect(resAPSC.is_sony_e_fallback == 1)
+    #expect(abs(resAPSC.resolved_crop_factor - 1.5) < 0.05)
+
+    // Verify lens listing helper
+    var lensNamesPtr: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?
+    var lensCount: Int32 = 0
+    let listRC = "Sony E".withCString { mPtr in
+        chiaro_lensfun_list_lenses(handle, mPtr, &lensNamesPtr, &lensCount)
+    }
+    #expect(listRC == 0)
+    #expect(lensCount >= 50)
+    chiaro_lensfun_free_string_list(lensNamesPtr, lensCount)
+
+    // Verify custom XML loading via user DB reload + 256x192 LUT computation
+    let customXML = """
+    <lensdatabase version="1">
+        <lens>
+            <maker>Tamron</maker>
+            <model>Tamron 25-200mm F/2.8-5.6 Di III VXD A075</model>
+            <mount>Sony E</mount>
+            <cropfactor>1.0</cropfactor>
+            <calibration>
+                <distortion model="ptlens" focal="50" a="0.001" b="-0.008" c="0.002"/>
+                <tca model="poly3" focal="50" br="-0.0002" vr="1.0001" bb="0.0002" vb="0.9999"/>
+                <vignetting model="pa" focal="50" aperture="4.0" distance="10" k1="-0.25" k2="0.05" k3="0.0"/>
+            </calibration>
+        </lens>
+    </lensdatabase>
+    """
+    let xmlURL = tmpUserDir.appendingPathComponent("tamron_a075.xml")
+    try customXML.write(to: xmlURL, atomically: true, encoding: .utf8)
+    #expect(tmpUserDir.path.withCString { chiaro_lensfun_reload_user_db(handle, $0) } == 0)
+
+    var infoAfter = ChiaroLensfunLibraryInfo()
+    #expect(chiaro_lensfun_get_info(handle, &infoAfter) == 0)
+    #expect(infoAfter.loaded_user_db == 1)
+
+    let lutW = 256
+    let lutH = 192
+    var warp = [Float](repeating: 0, count: 3 * lutW * lutH * 2)
+    var vig = [Float](repeating: 0, count: lutW * lutH)
+    var lutMatch = ChiaroLensfunMatchResult()
+    var lutParams = ChiaroLensfunLUTParams(
+        image_width: 7008,
+        image_height: 4672,
+        lut_width: Int32(lutW),
+        lut_height: Int32(lutH),
+        focal_length_mm: 50.0,
+        aperture_f_number: 4.0,
+        enable_distortion: 1,
+        enable_auto_scale: 1,
+        enable_tca: 1,
+        enable_vignetting: 1
+    )
+    let lutRC: Int32 = "SONY".withCString { mk in
+        "ILCE-7CM2".withCString { md in
+            "Tamron 25-200mm F/2.8-5.6 Di III VXD A075".withCString { lm in
+                var q = ChiaroLensfunMatchQuery(
+                    camera_make: mk,
+                    camera_model: md,
+                    lens_make: nil,
+                    lens_model: lm,
+                    camera_override: nil,
+                    lens_override: nil,
+                    crop_factor: 1.0
+                )
+                return warp.withUnsafeMutableBufferPointer { wPtr in
+                    vig.withUnsafeMutableBufferPointer { vPtr in
+                        chiaro_lensfun_compute_lut(handle, &q, &lutParams, wPtr.baseAddress, vPtr.baseAddress, &lutMatch)
+                    }
+                }
+            }
+        }
+    }
+    #expect(lutRC == 0)
+    #expect(lutMatch.has_distortion == 1)
+    #expect(lutMatch.has_tca == 1)
+    #expect(lutMatch.has_vignetting == 1)
+    #expect(warp.allSatisfy { $0.isFinite })
+    #expect(vig.allSatisfy { $0.isFinite && $0 >= 0.25 && $0 <= 8.0 })
+
+    // Invalid demosaic_algorithm enum must be rejected cleanly
+    var badOpts = hdr_libraw_default_options()
+    badOpts.demosaic_algorithm = HDRLibRawDemosaicAlgorithm(rawValue: 999)
+    var badImg = HDRLibRawImage()
+    var dummyByte: UInt8 = 0
+    let badStatus = hdr_libraw_decode_buffer(&dummyByte, 1, &badOpts, &badImg)
+    #expect(badStatus == HDR_LIBRAW_ERR_INVALID_ARG)
+    hdr_libraw_free_image(&badImg)
+}
+
+@Test(.enabled(if: TestFixtures.hasSampleDirectory, "Set CHIARO_SAMPLE_DIR to run real-ARW integration tests"))
+func testCLibRawBridgeDemosaicAlgorithmsAndSonyOpticsOnRealARW() throws {
+    let dsc2532 = tangmoDir.appendingPathComponent("DSC02532.ARW")
+    let dsc2556 = tangmoDir.appendingPathComponent("DSC02556.ARW")
+    try #require(FileManager.default.fileExists(atPath: dsc2532.path))
+    try #require(FileManager.default.fileExists(atPath: dsc2556.path))
+
+    let algos: [HDRLibRawDemosaicAlgorithm] = [
+        HDR_LIBRAW_DEMOSAIC_AMAZE,
+        HDR_LIBRAW_DEMOSAIC_LMMSE,
+        HDR_LIBRAW_DEMOSAIC_DCB,
+        HDR_LIBRAW_DEMOSAIC_DHT,
+        HDR_LIBRAW_DEMOSAIC_AHD,
+    ]
+    var samples: [(HDRLibRawDemosaicAlgorithm, [UInt16])] = []
+    for algo in algos {
+        var opts = hdr_libraw_default_options()
+        opts.mode = HDR_LIBRAW_MODE_LINEAR_RGB16
+        opts.output_color_space = HDR_LIBRAW_CS_CAMERA_NATIVE
+        opts.highlight_mode = 1
+        opts.demosaic_algorithm = algo
+        var img = HDRLibRawImage()
+        defer { hdr_libraw_free_image(&img) }
+        let status = dsc2532.path.withCString { hdr_libraw_decode_file($0, &opts, &img) }
+        #expect(status == HDR_LIBRAW_OK)
+        #expect(img.demosaic_used == algo)
+        #expect(img.width == 7008 && img.height == 4672)
+        #expect(img.embedded_sony_optics.has_optics == 1)
+        #expect(img.embedded_sony_optics.distortion_node_count == 16)
+        #expect(img.embedded_sony_optics.ca_node_count == 16)
+        #expect(img.embedded_sony_optics.vignetting_node_count == 16)
+
+        // Sample central 256x256 crop for fast pairwise distinctness check
+        let rgbPtr = try #require(img.rgb16_data)
+        let w = Int(img.width)
+        let startX = w / 2 - 128
+        let startY = Int(img.height) / 2 - 128
+        var patch: [UInt16] = []
+        patch.reserveCapacity(256 * 256 * 3)
+        for y in startY..<(startY + 256) {
+            let rowBase = (y * w + startX) * 3
+            for i in 0..<(256 * 3) {
+                patch.append(rgbPtr[rowBase + i])
+            }
+        }
+        samples.append((algo, patch))
+    }
+
+    for i in 0..<samples.count {
+        for j in (i + 1)..<samples.count {
+            let a = samples[i].1
+            let b = samples[j].1
+            var diffSum: Int64 = 0
+            for k in 0..<a.count {
+                diffSum += abs(Int64(a[k]) - Int64(b[k]))
+            }
+            let mad = Double(diffSum) / Double(a.count)
+            #expect(mad > 0.5, "Demosaic \(samples[i].0.rawValue) vs \(samples[j].0.rawValue) had MAD=\(mad)")
+        }
+    }
+
+    // APS-C 14MP sample (DSC02556.ARW): verify nc=11 slicing and non-zero FF tail discard
+    var optsAPSC = hdr_libraw_default_options()
+    optsAPSC.mode = HDR_LIBRAW_MODE_PROXY_RGB16
+    var imgAPSC = HDRLibRawImage()
+    defer { hdr_libraw_free_image(&imgAPSC) }
+    let stAPSC = dsc2556.path.withCString { hdr_libraw_decode_file($0, &optsAPSC, &imgAPSC) }
+    #expect(stAPSC == HDR_LIBRAW_OK)
+    #expect(imgAPSC.embedded_sony_optics.has_optics == 1)
+    #expect(imgAPSC.embedded_sony_optics.distortion_node_count == 11)
+    #expect(imgAPSC.embedded_sony_optics.ca_node_count == 11)
+    #expect(imgAPSC.embedded_sony_optics.vignetting_node_count == 11)
+    #expect(imgAPSC.embedded_sony_optics.ca_blue_params.0 == -512)
 }
 
 }

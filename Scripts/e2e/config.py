@@ -42,11 +42,9 @@ FORBIDDEN_SYMBOL_PATTERNS: List[str] = [
     "heif_context_",
     "heif_encoder_",
     "x265_encoder_",
+    "x264_encoder_",
+    "de265_",
     "Exiv2::",
-    "dht_demosaic",
-    "aahd_demosaic",
-    "dcb_demosaic",
-    "amaze_demosaic",
 ]
 
 PEAK_RSS_LIMIT_BYTES = 4_831_838_208  # 4.5 GiB

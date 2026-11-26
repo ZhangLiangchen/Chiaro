@@ -131,7 +131,8 @@ struct ChiaroCLIMain {
             highlightMode: preset.developDefaults.highlightReconstruction,
             isProxy: false,
             maxThreadsPerWorker: 2,
-            customRenderedHDR: config.customRenderedHDR || preset.compatOptions.writeCustomRenderedHDR
+            customRenderedHDR: config.customRenderedHDR || preset.compatOptions.writeCustomRenderedHDR,
+            demosaicAlgorithm: config.cliOverrides.demosaic ?? .amaze
         )
 
         let jobs = inputURLs.map { inputURL in
@@ -145,7 +146,10 @@ struct ChiaroCLIMain {
                 namingTemplate: config.namingTemplate,
                 useFormatSubdirectories: config.useFormatSubdirectories,
                 conflictPolicy: config.conflictPolicy,
-                verifyAfterExport: config.verifyAfterExport
+                verifyAfterExport: config.verifyAfterExport,
+                cliOverrides: config.cliOverrides,
+                useSidecar: config.useSidecar,
+                avifCodecOverride: config.avifCodecOverride
             )
         }
 
@@ -154,7 +158,7 @@ struct ChiaroCLIMain {
 
         let results: [ExportResult]
         do {
-            results = try await pipeline.run(jobs: jobs) { event in
+            results = try await pipeline.runDetailed(jobs: jobs) { event in
                 handleProgressEvent(event, jsonProgress: jsonProgress, printer: printer)
             }
         } catch {
@@ -174,7 +178,7 @@ struct ChiaroCLIMain {
     }
 
     private static func handleProgressEvent(
-        _ event: BatchProgressEvent,
+        _ event: BatchDetailedProgressEvent,
         jsonProgress: Bool,
         printer: NDJSONPrinter
     ) {
@@ -196,15 +200,18 @@ struct ChiaroCLIMain {
                     "filename": sourceURL.lastPathComponent,
                 ])
 
-            case let .jobDecoded(jobID, sourceURL, backendUsed, fallbackReason):
+            case let .jobDecoded(details):
                 var payload: [String: Any] = [
                     "event": "job_decoded",
-                    "jobID": jobID.uuidString,
-                    "source": sourceURL.path,
-                    "filename": sourceURL.lastPathComponent,
-                    "backend": backendUsed.rawValue,
+                    "jobID": details.jobID.uuidString,
+                    "source": details.sourceURL.path,
+                    "filename": details.sourceURL.lastPathComponent,
+                    "backend": details.backendUsed.rawValue,
+                    "demosaicUsed": details.demosaicUsed?.rawValue ?? NSNull(),
+                    "opticsSource": details.opticsSource.rawValue,
+                    "lensMatched": details.lensMatched ?? NSNull(),
                 ]
-                if let fallbackReason {
+                if let fallbackReason = details.fallbackReason {
                     payload["fallbackReason"] = fallbackReason
                 }
                 printer.emit(payload)

@@ -172,6 +172,20 @@ private struct HLGConvertUniforms {
     var pad2: UInt32 = 0
 }
 
+private struct ClarityUniforms {
+    var width: UInt32
+    var height: UInt32
+    var stride: UInt32
+    var clarity: Float
+}
+
+private struct OpticalSharpnessUniforms {
+    var width: UInt32
+    var height: UInt32
+    var dt: Float
+    var pad0: Float = 0
+}
+
 public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendable {
     private struct CVCacheBox: @unchecked Sendable {
         var cache: CVMetalTextureCache?
@@ -190,12 +204,21 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
     public let texturePool: MTLHeapTexturePool
     public let gainMapSynthesizer: GainMapSynthesizer
     public let edrPreviewPipeline: EDRPreviewPipeline
+    public let denoiseStage: any LinearDenoiseStage
+    public let opticsStage: any OpticalCorrectionStage
+    public let colorGradingStage: any ColorGradingStage
 
     private let dummyTex2D: any MTLTexture
     private let dummyTex3D: any MTLTexture
     private let cvCacheLock: OSAllocatedUnfairLock<CVCacheBox>
 
-    public init(device: (any MTLDevice)? = nil, poolMaxBytes: Int? = nil) throws {
+    public init(
+        device: (any MTLDevice)? = nil,
+        poolMaxBytes: Int? = nil,
+        denoiseStage: (any LinearDenoiseStage)? = nil,
+        opticsStage: (any OpticalCorrectionStage)? = nil,
+        colorGradingStage: (any ColorGradingStage)? = nil
+    ) throws {
         guard let dev = device ?? MTLCreateSystemDefaultDevice() else {
             throw MetalPipelineError.metalUnavailable
         }
@@ -213,6 +236,16 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
             pool: self.texturePool
         )
         self.edrPreviewPipeline = EDRPreviewPipeline(device: dev, shaderLibrary: self.shaderLibrary)
+        self.denoiseStage = try denoiseStage ?? ProfiledWaveletDenoiseStage(
+            device: dev,
+            shaderLibrary: self.shaderLibrary,
+            texturePool: self.texturePool
+        )
+        self.opticsStage = try opticsStage ?? OpticsPipelineEngine(
+            device: dev,
+            shaderLibrary: self.shaderLibrary
+        )
+        self.colorGradingStage = colorGradingStage ?? PassThroughColorGradingStage()
 
         let d2Desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: 1, height: 1, mipmapped: false)
         d2Desc.usage = .shaderRead
@@ -257,13 +290,48 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
         outputSpec: RenderOutputSpec,
         rawCalibration: RAWLevelCalibration?
     ) async throws -> RenderedFrame {
+        var workingFrame = frame
+        return try await renderImpl(
+            frame: &workingFrame,
+            releasePayloadAfterIngest: false,
+            params: params,
+            outputSpec: outputSpec,
+            rawCalibration: rawCalibration
+        )
+    }
+
+    internal func renderAndReleasePayload(
+        frame: inout DecodedRAWFrame,
+        params: EffectiveDevelopParams,
+        outputSpec: RenderOutputSpec,
+        rawCalibration: RAWLevelCalibration? = nil
+    ) async throws -> RenderedFrame {
+        try await renderImpl(
+            frame: &frame,
+            releasePayloadAfterIngest: true,
+            params: params,
+            outputSpec: outputSpec,
+            rawCalibration: rawCalibration
+        )
+    }
+
+    private func renderImpl(
+        frame: inout DecodedRAWFrame,
+        releasePayloadAfterIngest: Bool,
+        params: EffectiveDevelopParams,
+        outputSpec: RenderOutputSpec,
+        rawCalibration: RAWLevelCalibration?
+    ) async throws -> RenderedFrame {
         let safeMidtoneAnchorP = params.midtoneAnchorP.isFinite ? min(max(params.midtoneAnchorP, 0.65), 0.95) : 0.80
         let safeTargetHeadroom = HeadroomStops(
             log2Value: params.targetHeadroom.log2Value.isFinite ? max(params.targetHeadroom.log2Value, 0.0) : 0.0
         )
 
-        let (sdrLinearTex, hdrLinearTex, sdrCGImage, geom) = try autoreleasepool {
-            () throws -> (SendableMTLTexture, SendableMTLTexture, CGImage, OutputGeometry) in
+        let maxDim = MTLHeapTexturePool.maxTextureDimension(for: device)
+
+        // Phase A (Stage 1): Ingest RAW payload, highlight reconstruction, Camera -> Linear Rec.2020 (D65)
+        var (rec2020Opt, srcW, srcH, customWBAppliedInPass1): (SendableMTLTexture?, Int, Int, Bool) = try autoreleasepool {
+            () throws -> (SendableMTLTexture?, Int, Int, Bool) in
 
             // Load optional DCP profile / Creative Look / .cube LUT
             var loadedDCP: DCPProfile? = nil
@@ -341,7 +409,6 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
             }
 
             // Stage 1-2: Ingest payload & transform to Linear Rec.2020 (D65)
-            let maxDim = MTLHeapTexturePool.maxTextureDimension(for: device)
             let srcW: Int
             let srcH: Int
             let rec2020Tex: SendableMTLTexture
@@ -783,37 +850,84 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
                 }
             }
 
-            // Compute Pass 5 output geometry (Orientation 1..8 -> Upright, Aspect Crop, Linear Resize)
-            let geom = ColorTransforms.computeOutputGeometry(
-                srcWidth: srcW,
-                srcHeight: srcH,
-                orientation: frame.orientation,
-                cropAspect: params.cropAspect,
-                cropOffset: params.cropOffset,
-                maxLongEdge: params.maxLongEdge,
-                gainMapResolution: outputSpec.gainMapResolution,
-                gainMapChannels: outputSpec.gainMapChannels
+            return (rec2020Tex, srcW, srcH, customWBAppliedInPass1)
+        }
+        if releasePayloadAfterIngest {
+            frame.payload = .linearRGB16U(width: 0, height: 0, colorSpace: .cameraNative, data: Data())
+        }
+
+        // Stage 2A: LinearDenoiseStage (strictly BEFORE OpticalCorrectionStage per ADR-017).
+        // Bypassed by default when CIRAWv9 ANE already denoised and preferANE == true.
+        var stage2AOpt: SendableMTLTexture?
+        let shouldRunLinearDenoise =
+            (params.denoise.mode == .profiledWavelet || params.denoise.mode == .coreMLANE)
+            && !(frame.backendUsed == .ciraw9 && params.denoise.preferANE)
+            && (params.denoise.luminanceStrength > 0.0 || params.denoise.chromaStrength > 0.0)
+        if shouldRunLinearDenoise {
+            let inputRec2020 = rec2020Opt!
+            let noiseProfile = SensorNoiseProfileLoader.shared.profileWithSonyFallback(
+                forMake: frame.exif.make,
+                model: frame.exif.model
             )
-            guard geom.outWidth > 0,
-                  geom.outHeight > 0,
-                  geom.outWidth <= maxDim,
-                  geom.outHeight <= maxDim else {
-                throw MetalPipelineError.invalidDimensions(width: geom.outWidth, height: geom.outHeight)
+            let denoisedTex = try await denoiseStage.denoise(
+                inputTexture: inputRec2020.texture,
+                iso: frame.isoSpeed,
+                noiseProfile: noiseProfile,
+                params: params.denoise,
+                commandQueue: commandQueue
+            )
+            stage2AOpt = SendableMTLTexture(denoisedTex)
+            if denoisedTex !== inputRec2020.texture {
+                rec2020Opt = nil
             }
+        } else {
+            stage2AOpt = rec2020Opt
+        }
+        rec2020Opt = nil
 
-            // Stage 3 + 5A + 4 + 5B in single GPU command buffer
+        // Stage 2B: OpticalCorrectionStage (unrotated sensor coordinates)
+        var stage2BOpt: SendableMTLTexture?
+        if params.optics.enabled {
+            let inputStage2A = stage2AOpt!
+            let (correctedTex, _) = try await opticsStage.applyCorrection(
+                inputTexture: inputStage2A.texture,
+                frame: frame,
+                params: params.optics,
+                commandQueue: commandQueue
+            )
+            stage2BOpt = SendableMTLTexture(correctedTex)
+            if correctedTex !== inputStage2A.texture {
+                stage2AOpt = nil
+            }
+        } else {
+            stage2BOpt = stage2AOpt
+        }
+        stage2AOpt = nil
+
+        // Compute Pass 5 output geometry (Orientation 1..8 -> Upright, Aspect Crop, Linear Resize)
+        let geom = ColorTransforms.computeOutputGeometry(
+            srcWidth: srcW,
+            srcHeight: srcH,
+            orientation: frame.orientation,
+            cropAspect: params.cropAspect,
+            cropOffset: params.cropOffset,
+            maxLongEdge: params.maxLongEdge,
+            gainMapResolution: outputSpec.gainMapResolution,
+            gainMapChannels: outputSpec.gainMapChannels
+        )
+        guard geom.outWidth > 0,
+              geom.outHeight > 0,
+              geom.outWidth <= maxDim,
+              geom.outHeight <= maxDim else {
+            throw MetalPipelineError.invalidDimensions(width: geom.outWidth, height: geom.outHeight)
+        }
+
+        // Phase B (Stage 2C + OrientCropResize): Scene Grading, Optical Sharpness, Clarity, Orient/Crop/Resize
+        var uprightRec2020Opt: SendableMTLTexture? = try autoreleasepool { () throws -> SendableMTLTexture in
+            let stage2BBox = stage2BOpt!
             let gradedTex = try texturePool.acquire(width: srcW, height: srcH, pixelFormat: .rgba16Float)
-            let uprightRec2020Tex = try texturePool.acquire(width: geom.outWidth, height: geom.outHeight, pixelFormat: .rgba16Float)
-            let sdrLinearTex = try texturePool.acquire(width: geom.outWidth, height: geom.outHeight, pixelFormat: .rgba16Float)
-            let hdrLinearTex = try texturePool.acquire(width: geom.outWidth, height: geom.outHeight, pixelFormat: .rgba16Float)
-
-            let is16Bit = (outputSpec.targetBitDepth == .bit10)
-            let bytesPerPixel = is16Bit ? 8 : 4
-            let outBytesPerRow = geom.outWidth * bytesPerPixel
-            let outByteCount = outBytesPerRow * geom.outHeight
-            guard let cgOutBuf = device.makeBuffer(length: outByteCount, options: .storageModeShared) else {
-                throw MetalPipelineError.bufferAllocationFailed
-            }
+            let uprightTex = try texturePool.acquire(width: geom.outWidth, height: geom.outHeight, pixelFormat: .rgba16Float)
+            var retainedCB: [SendableMTLTexture] = [stage2BBox, gradedTex, uprightTex]
 
             let wbMatDouble: simd_double3x3
             if !customWBAppliedInPass1, case let .custom(kelvin, tint) = params.develop.whiteBalance {
@@ -850,10 +964,87 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
                     vibrance: Float(params.develop.vibrance)
                 )
                 enc.setComputePipelineState(pso)
-                enc.setTexture(rec2020Tex.texture, index: 0)
+                enc.setTexture(stage2BBox.texture, index: 0)
                 enc.setTexture(gradedTex.texture, index: 1)
                 enc.setBytes(&su, length: MemoryLayout<SceneGradingUniforms>.stride, index: 0)
                 enc.dispatchThreadgroups(srcGrid, threadsPerThreadgroup: tg)
+            }
+
+            var current2CTex = gradedTex
+
+            // Optional Stage 2C-1: Physical Inverse-Diffusion Optical Sharpness (0...100)
+            let sharpStrength = params.develop.opticalSharpness
+            if sharpStrength.isFinite && sharpStrength > 1e-4 {
+                let diffA = try texturePool.acquire(width: srcW, height: srcH, pixelFormat: .r32Float)
+                let diffB = try texturePool.acquire(width: srcW, height: srcH, pixelFormat: .r32Float)
+                let sharpOutTex = try texturePool.acquire(width: srcW, height: srcH, pixelFormat: .rgba16Float)
+                retainedCB.append(contentsOf: [diffA, diffB, sharpOutTex])
+
+                let initPSO = try shaderLibrary.computePipelineState(for: "optical_sharpness_init_kernel")
+                let stepPSO = try shaderLibrary.computePipelineState(for: "optical_sharpness_diffuse_step_kernel")
+                let appPSO = try shaderLibrary.computePipelineState(for: "optical_sharpness_apply_kernel")
+
+                let dt = Float(0.14 * min(max(sharpStrength, 0.0), 100.0) / 100.0)
+                var osu = OpticalSharpnessUniforms(width: UInt32(srcW), height: UInt32(srcH), dt: dt)
+
+                enc.setComputePipelineState(initPSO)
+                enc.setTexture(current2CTex.texture, index: 0)
+                enc.setTexture(diffA.texture, index: 1)
+                enc.setBytes(&osu, length: MemoryLayout<OpticalSharpnessUniforms>.stride, index: 0)
+                enc.dispatchThreadgroups(srcGrid, threadsPerThreadgroup: tg)
+
+                var curDiff = diffA
+                var nextDiff = diffB
+                for _ in 0..<4 {
+                    enc.setComputePipelineState(stepPSO)
+                    enc.setTexture(curDiff.texture, index: 0)
+                    enc.setTexture(nextDiff.texture, index: 1)
+                    enc.setBytes(&osu, length: MemoryLayout<OpticalSharpnessUniforms>.stride, index: 0)
+                    enc.dispatchThreadgroups(srcGrid, threadsPerThreadgroup: tg)
+                    swap(&curDiff, &nextDiff)
+                }
+
+                enc.setComputePipelineState(appPSO)
+                enc.setTexture(current2CTex.texture, index: 0)
+                enc.setTexture(curDiff.texture, index: 1)
+                enc.setTexture(sharpOutTex.texture, index: 2)
+                enc.setBytes(&osu, length: MemoryLayout<OpticalSharpnessUniforms>.stride, index: 0)
+                enc.dispatchThreadgroups(srcGrid, threadsPerThreadgroup: tg)
+
+                current2CTex = sharpOutTex
+            }
+
+            // Optional Stage 2C-2: Halo-Free Edge-Aware Clarity (-100...+100)
+            let clarityVal = params.develop.clarity
+            if clarityVal.isFinite && abs(clarityVal) > 1e-4 {
+                let clarityTmp = try texturePool.acquire(width: srcW, height: srcH, pixelFormat: .rg16Float)
+                let clarityOut = try texturePool.acquire(width: srcW, height: srcH, pixelFormat: .rgba16Float)
+                retainedCB.append(contentsOf: [clarityTmp, clarityOut])
+
+                let hPSO = try shaderLibrary.computePipelineState(for: "clarity_bilateral_h_kernel")
+                let vPSO = try shaderLibrary.computePipelineState(for: "clarity_bilateral_v_apply_kernel")
+                let stride = UInt32(max(1, min(srcW, srcH) / 1500 + 1))
+                var cu = ClarityUniforms(
+                    width: UInt32(srcW),
+                    height: UInt32(srcH),
+                    stride: stride,
+                    clarity: Float(min(max(clarityVal, -100.0), 100.0))
+                )
+
+                enc.setComputePipelineState(hPSO)
+                enc.setTexture(current2CTex.texture, index: 0)
+                enc.setTexture(clarityTmp.texture, index: 1)
+                enc.setBytes(&cu, length: MemoryLayout<ClarityUniforms>.stride, index: 0)
+                enc.dispatchThreadgroups(srcGrid, threadsPerThreadgroup: tg)
+
+                enc.setComputePipelineState(vPSO)
+                enc.setTexture(current2CTex.texture, index: 0)
+                enc.setTexture(clarityTmp.texture, index: 1)
+                enc.setTexture(clarityOut.texture, index: 2)
+                enc.setBytes(&cu, length: MemoryLayout<ClarityUniforms>.stride, index: 0)
+                enc.dispatchThreadgroups(srcGrid, threadsPerThreadgroup: tg)
+
+                current2CTex = clarityOut
             }
 
             // Pass 5A: Orientation Baking + Aspect Crop + Linear-Light Resize
@@ -873,10 +1064,55 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
                     isOneToOne: isOneToOne
                 )
                 enc.setComputePipelineState(pso)
-                enc.setTexture(gradedTex.texture, index: 0)
-                enc.setTexture(uprightRec2020Tex.texture, index: 1)
+                enc.setTexture(current2CTex.texture, index: 0)
+                enc.setTexture(uprightTex.texture, index: 1)
                 enc.setBytes(&ou, length: MemoryLayout<OrientCropResizeUniforms>.stride, index: 0)
                 enc.dispatchThreadgroups(outGrid, threadsPerThreadgroup: tg)
+            }
+
+            enc.endEncoding()
+            let kept = retainedCB
+            cb.addCompletedHandler { _ in _ = kept }
+            cb.commit()
+            cb.waitUntilCompleted()
+            if let err = cb.error {
+                throw MetalPipelineError.gpuExecutionFailed(String(describing: err))
+            }
+            return uprightTex
+        }
+        stage2BOpt = nil
+
+        // Stage 2D [v3 Slot]: ColorGradingStage (default PassThroughColorGradingStage)
+        var stage2DOpt: SendableMTLTexture? = SendableMTLTexture(
+            try await colorGradingStage.apply(
+                inputTexture: uprightRec2020Opt!.texture,
+                params: params.aiColor,
+                commandQueue: commandQueue
+            )
+        )
+
+        // Phase C (Stage 2E): Dual-Branch ToneMap + OKLab Gamut Map + sRGB Quantization
+        let (sdrLinearTex, hdrLinearTex, sdrCGImage) = try autoreleasepool {
+            () throws -> (SendableMTLTexture, SendableMTLTexture, CGImage) in
+            let uprightRec2020Tex = uprightRec2020Opt!
+            let stage2DBox = stage2DOpt!
+            let sdrLinearTex = try texturePool.acquire(width: geom.outWidth, height: geom.outHeight, pixelFormat: .rgba16Float)
+            let hdrLinearTex = try texturePool.acquire(width: geom.outWidth, height: geom.outHeight, pixelFormat: .rgba16Float)
+
+            let is16Bit = (outputSpec.targetBitDepth == .bit10)
+            let bytesPerPixel = is16Bit ? 8 : 4
+            let outBytesPerRow = geom.outWidth * bytesPerPixel
+            let outByteCount = outBytesPerRow * geom.outHeight
+            guard let cgOutBuf = device.makeBuffer(length: outByteCount, options: .storageModeShared) else {
+                throw MetalPipelineError.bufferAllocationFailed
+            }
+
+            let tg = MTLSize(width: 16, height: 16, depth: 1)
+            let outGrid = MTLSize(width: (geom.outWidth + 15) / 16, height: (geom.outHeight + 15) / 16, depth: 1)
+
+            guard let cb = commandQueue.makeCommandBuffer(),
+                  let enc = cb.makeComputeCommandEncoder() else {
+                throw MetalPipelineError.commandEncodingFailed
             }
 
             // Pass 4: Midtone-Locked Dual-Branch Tone Mapping + OKLab Soft Gamut Mapping
@@ -887,6 +1123,7 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
                 case .agx: mapperCode = 0
                 case .neutralRational: mapperCode = 1
                 case .openDRT: mapperCode = 2
+                case .sigmoid: mapperCode = 3
                 }
                 var tu = ToneMapGamutUniforms(
                     midtoneAnchorP: Float(safeMidtoneAnchorP),
@@ -901,7 +1138,7 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
                     hdrRolloffSoftness: Float(params.develop.hdrRolloffSoftness)
                 )
                 enc.setComputePipelineState(pso)
-                enc.setTexture(uprightRec2020Tex.texture, index: 0)
+                enc.setTexture(stage2DBox.texture, index: 0)
                 enc.setTexture(sdrLinearTex.texture, index: 1)
                 enc.setTexture(hdrLinearTex.texture, index: 2)
                 enc.setBytes(&tu, length: MemoryLayout<ToneMapGamutUniforms>.stride, index: 0)
@@ -925,7 +1162,7 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
             }
 
             enc.endEncoding()
-            let kept = [rec2020Tex, gradedTex, uprightRec2020Tex, sdrLinearTex, hdrLinearTex]
+            let kept = [uprightRec2020Tex, stage2DBox, sdrLinearTex, hdrLinearTex]
             cb.addCompletedHandler { _ in _ = kept }
             cb.commit()
             cb.waitUntilCompleted()
@@ -962,8 +1199,10 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
                 throw MetalPipelineError.cgImageCreationFailed
             }
 
-            return (sdrLinearTex, hdrLinearTex, cgImage, geom)
+            return (sdrLinearTex, hdrLinearTex, cgImage)
         }
+        uprightRec2020Opt = nil
+        stage2DOpt = nil
 
         // ISO/IEC 21496-1:2025 Gain Map Synthesis
         let gainMapResult = try gainMapSynthesizer.synthesize(
@@ -1198,12 +1437,12 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
 
         switch mode {
         case .opposedInpaint:
-            let groupCount = max(1, gridW * gridH)
-            let groupAccumBytes = groupCount * 6 * MemoryLayout<Float>.stride
-            guard let groupAccumBuf = device.makeBuffer(length: groupAccumBytes, options: .storageModePrivate),
+            let chromaHistBytes = 6 * 256 * MemoryLayout<UInt32>.stride
+            guard let chromaHistBuf = device.makeBuffer(length: chromaHistBytes, options: .storageModeShared),
                   let finalChromaBuf = device.makeBuffer(length: 4 * MemoryLayout<Float>.stride, options: .storageModePrivate) else {
                 throw MetalPipelineError.bufferAllocationFailed
             }
+            memset(chromaHistBuf.contents(), 0, chromaHistBytes)
 
             let redPSO = try shaderLibrary.computePipelineState(for: "opposed_inpaint_reduce_kernel")
             let finPSO = try shaderLibrary.computePipelineState(for: "opposed_inpaint_finalize_kernel")
@@ -1214,15 +1453,13 @@ public final class MetalPipelineEngine: MetalPipelineProtocol, @unchecked Sendab
 
             enc.setComputePipelineState(redPSO)
             enc.setTexture(inTex.texture, index: 0)
-            enc.setBuffer(groupAccumBuf, offset: 0, index: 0)
+            enc.setBuffer(chromaHistBuf, offset: 0, index: 0)
             enc.setBytes(&hrUniforms, length: MemoryLayout<HighlightReconUniforms>.stride, index: 1)
             enc.dispatchThreadgroups(grid, threadsPerThreadgroup: tg)
 
-            var gc = UInt32(groupCount)
             enc.setComputePipelineState(finPSO)
-            enc.setBuffer(groupAccumBuf, offset: 0, index: 0)
+            enc.setBuffer(chromaHistBuf, offset: 0, index: 0)
             enc.setBuffer(finalChromaBuf, offset: 0, index: 1)
-            enc.setBytes(&gc, length: MemoryLayout<UInt32>.stride, index: 2)
             enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
 
             enc.setComputePipelineState(appPSO)

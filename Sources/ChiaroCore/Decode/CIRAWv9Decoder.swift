@@ -338,6 +338,28 @@ public final class CIRAWv9Decoder: ARWDecoderProtocol, Sendable {
             asShotWBApplied: true
         )
 
+        let resolvedCropFactor: Double = {
+            if let fMM = exif.focalLengthMM, fMM > 0, let f35 = exif.focalLengthIn35mmFilm, f35 > 0 {
+                let ratio = Double(f35) / fMM
+                if (1.42...1.60).contains(ratio) { return 1.5 }
+                if (0.94...1.06).contains(ratio) { return 1.0 }
+                if ratio.isFinite && ratio > 0 { return ratio }
+            }
+            if let opt = inspection?.embeddedSonyOptics, opt.distortionNodeCount == 11 {
+                return 1.5
+            }
+            return 1.0
+        }()
+
+        let resolvedOptics: EmbeddedSonyOpticsPayload? = inspection?.embeddedSonyOptics.map { opt in
+            var copy = opt
+            copy.focalLengthMM = exif.focalLengthMM
+            copy.fNumber = exif.fNumber
+            copy.sensorAspectRatio = height > 0 ? Double(width) / Double(height) : 1.5
+            copy.cropFactor = resolvedCropFactor
+            return copy
+        }
+
         return DecodedRAWFrame(
             sourceURL: url,
             backendUsed: .ciraw9,
@@ -352,7 +374,11 @@ public final class CIRAWv9Decoder: ARWDecoderProtocol, Sendable {
             orientation: normalizedOrientation,
             colorMatrices: matrices,
             isLosslessMS: false,
-            exif: exif
+            exif: exif,
+            demosaicUsed: nil,
+            embeddedSonyOptics: resolvedOptics,
+            fullSensorDimensions: inspection?.fullSensorDimensions ?? PixelDimensions(width: width, height: height),
+            cropFactor: resolvedCropFactor
         )
     }
 }
@@ -369,6 +395,8 @@ private final class SendableErrorBox: @unchecked Sendable {
 private struct TIFFPreflightResult: Sendable {
     let isLosslessMS: Bool
     let exif: WhitelistedExif
+    let embeddedSonyOptics: EmbeddedSonyOpticsPayload?
+    let fullSensorDimensions: PixelDimensions?
 }
 
 private enum TIFFPreflightInspector {
@@ -407,6 +435,18 @@ private enum TIFFPreflightInspector {
         var orientation: Int = 1
         var dateTimeIFD0: String?
         var detectedLosslessMS = false
+        var rawSensorW: Int = 0
+        var rawSensorH: Int = 0
+        var sonyDistParams: [Int16] = []
+        var sonyDistCount: Int = 0
+        var sonyCARedParams: [Int16] = []
+        var sonyCABlueParams: [Int16] = []
+        var sonyCACount: Int = 0
+        var sonyVigParams: [Int16] = []
+        var sonyVigCount: Int = 0
+        var sr2Offset: UInt32?
+        var sr2Length: UInt32?
+        var sr2Key: UInt32?
 
         // Walk IFD0 chain (bounded to max 4 chained IFDs)
         var currentIFDOffset: UInt32? = ifd0Offset
@@ -463,6 +503,40 @@ private enum TIFFPreflightInspector {
                     if gpsIFDOffset == nil {
                         gpsIFDOffset = readFirstUInt32(fh: fh, entry: entry, littleEndian: isLittleEndian)
                     }
+                case 0x7037: // Sony DistortionCorrParams
+                    if sonyDistCount == 0 {
+                        let arr = readInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                        if let nc = arr.first.map(Int.init), nc > 0, nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + nc {
+                            sonyDistCount = nc
+                            sonyDistParams = Array(arr[1..<(1 + nc)])
+                        }
+                    }
+                case 0x7035: // Sony ChromaticAberrationCorrParams
+                    if sonyCACount == 0 {
+                        let arr = readInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                        if let total = arr.first.map(Int.init), total > 0, total % 2 == 0 {
+                            let nc = total / 2
+                            if nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + 2 * nc {
+                                sonyCACount = nc
+                                sonyCARedParams = Array(arr[1..<(1 + nc)])
+                                sonyCABlueParams = Array(arr[(1 + nc)..<(1 + 2 * nc)])
+                            }
+                        }
+                    }
+                case 0x7032: // Sony VignettingCorrParams
+                    if sonyVigCount == 0 {
+                        let arr = readInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                        if let nc = arr.first.map(Int.init), nc > 0, nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + nc {
+                            sonyVigCount = nc
+                            sonyVigParams = Array(arr[1..<(1 + nc)])
+                        }
+                    }
+                case 0x7200:
+                    sr2Offset = readFirstUInt32FromRaw4(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                case 0x7201:
+                    sr2Length = readFirstUInt32FromRaw4(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                case 0x7221:
+                    sr2Key = readFirstUInt32FromRaw4(fh: fh, entry: entry, littleEndian: isLittleEndian)
                 default:
                     break
                 }
@@ -493,11 +567,21 @@ private enum TIFFPreflightInspector {
             var photometric: UInt16?
             var samplesPerPixel: UInt16?
             var bitsPerSample: [UInt16] = []
+            var subW: Int = 0
+            var subH: Int = 0
 
             for entry in subIFD.entries {
                 switch entry.tag {
                 case 0x00FE:
                     subfileType = readFirstUInt32(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                case 0x0100:
+                    if let v = readFirstUInt32(fh: fh, entry: entry, littleEndian: isLittleEndian) {
+                        subW = Int(v)
+                    }
+                case 0x0101:
+                    if let v = readFirstUInt32(fh: fh, entry: entry, littleEndian: isLittleEndian) {
+                        subH = Int(v)
+                    }
                 case 0x0102:
                     bitsPerSample = readUInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
                 case 0x0103:
@@ -514,9 +598,53 @@ private enum TIFFPreflightInspector {
                     if gpsIFDOffset == nil {
                         gpsIFDOffset = readFirstUInt32(fh: fh, entry: entry, littleEndian: isLittleEndian)
                     }
+                case 0x7037:
+                    if sonyDistCount == 0 {
+                        let arr = readInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                        if let nc = arr.first.map(Int.init), nc > 0, nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + nc {
+                            sonyDistCount = nc
+                            sonyDistParams = Array(arr[1..<(1 + nc)])
+                        }
+                    }
+                case 0x7035:
+                    if sonyCACount == 0 {
+                        let arr = readInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                        if let total = arr.first.map(Int.init), total > 0, total % 2 == 0 {
+                            let nc = total / 2
+                            if nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + 2 * nc {
+                                sonyCACount = nc
+                                sonyCARedParams = Array(arr[1..<(1 + nc)])
+                                sonyCABlueParams = Array(arr[(1 + nc)..<(1 + 2 * nc)])
+                            }
+                        }
+                    }
+                case 0x7032:
+                    if sonyVigCount == 0 {
+                        let arr = readInt16Array(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                        if let nc = arr.first.map(Int.init), nc > 0, nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + nc {
+                            sonyVigCount = nc
+                            sonyVigParams = Array(arr[1..<(1 + nc)])
+                        }
+                    }
+                case 0x7200:
+                    if sr2Offset == nil {
+                        sr2Offset = readFirstUInt32FromRaw4(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                    }
+                case 0x7201:
+                    if sr2Length == nil {
+                        sr2Length = readFirstUInt32FromRaw4(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                    }
+                case 0x7221:
+                    if sr2Key == nil {
+                        sr2Key = readFirstUInt32FromRaw4(fh: fh, entry: entry, littleEndian: isLittleEndian)
+                    }
                 default:
                     break
                 }
+            }
+            if subW > rawSensorW && subH > rawSensorH {
+                rawSensorW = subW
+                rawSensorH = subH
             }
 
             if isSonyLosslessMSIFD(
@@ -708,9 +836,82 @@ private enum TIFFPreflightInspector {
             finalExif.gpsDateStamp = cgExif.gpsDateStamp
         }
 
+        // SR2SubIFD decryption fallback if any optical table was missing from unencrypted SubIFD
+        if (sonyDistCount == 0 || sonyCACount == 0 || sonyVigCount == 0),
+           let off = sr2Offset, let len = sr2Length, let key = sr2Key,
+           len >= 16, len <= 10_240_000,
+           var sr2Buf = readBytes(fh: fh, offset: UInt64(off), count: Int(len)),
+           sr2Buf.count == Int(len) {
+            sonyDecryptBuffer(&sr2Buf, key: key)
+            let entries = Int(readUInt16(sr2Buf, at: 0, littleEndian: isLittleEndian))
+            if entries > 0 && entries <= maxEntriesPerIFD {
+                for i in 0..<entries {
+                    let eOff = 2 + i * 12
+                    if eOff + 12 > sr2Buf.count { break }
+                    let sTag = readUInt16(sr2Buf, at: eOff, littleEndian: isLittleEndian)
+                    let sType = readUInt16(sr2Buf, at: eOff + 2, littleEndian: isLittleEndian)
+                    let sCount = Int(readUInt32(sr2Buf, at: eOff + 4, littleEndian: isLittleEndian))
+                    let sValOff = readUInt32(sr2Buf, at: eOff + 8, littleEndian: isLittleEndian)
+                    guard sTag == 0x7982 || sTag == 0x7980 || sTag == 0x797d,
+                          sType == 3 || sType == 8,
+                          sCount > 0 && sCount <= 64 else { continue }
+                    let dataBytes = sCount * 2
+                    let relOff: Int
+                    if dataBytes <= 4 {
+                        relOff = eOff + 8
+                    } else {
+                        guard sValOff >= off else { continue }
+                        relOff = Int(sValOff - off)
+                    }
+                    guard relOff + dataBytes <= sr2Buf.count else { continue }
+                    let arr = (0..<sCount).map { k in
+                        Int16(bitPattern: readUInt16(sr2Buf, at: relOff + k * 2, littleEndian: isLittleEndian))
+                    }
+                    if sTag == 0x7982, sonyDistCount == 0, let nc = arr.first.map(Int.init),
+                       nc > 0, nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + nc {
+                        sonyDistCount = nc
+                        sonyDistParams = Array(arr[1..<(1 + nc)])
+                    } else if sTag == 0x7980, sonyCACount == 0, let total = arr.first.map(Int.init),
+                              total > 0, total % 2 == 0 {
+                        let nc = total / 2
+                        if nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + 2 * nc {
+                            sonyCACount = nc
+                            sonyCARedParams = Array(arr[1..<(1 + nc)])
+                            sonyCABlueParams = Array(arr[(1 + nc)..<(1 + 2 * nc)])
+                        }
+                    } else if sTag == 0x797d, sonyVigCount == 0, let nc = arr.first.map(Int.init),
+                              nc > 0, nc <= EmbeddedSonyOpticsPayload.maxNodeCount, arr.count >= 1 + nc {
+                        sonyVigCount = nc
+                        sonyVigParams = Array(arr[1..<(1 + nc)])
+                    }
+                }
+            }
+        }
+
+        let embeddedPayload: EmbeddedSonyOpticsPayload? = {
+            let candidate = EmbeddedSonyOpticsPayload(
+                distortionNodeCount: sonyDistCount,
+                distortionParams: sonyDistParams,
+                caNodeCount: sonyCACount,
+                caRedParams: sonyCARedParams,
+                caBlueParams: sonyCABlueParams,
+                vignettingNodeCount: sonyVigCount,
+                vignettingParams: sonyVigParams,
+                focalLengthMM: finalExif.focalLengthMM,
+                fNumber: finalExif.fNumber
+            )
+            return candidate.hasAnyCorrection ? candidate : nil
+        }()
+
+        let fullDims: PixelDimensions? = (rawSensorW > 0 && rawSensorH > 0)
+            ? PixelDimensions(width: rawSensorW, height: rawSensorH)
+            : nil
+
         return TIFFPreflightResult(
             isLosslessMS: detectedLosslessMS,
-            exif: finalExif
+            exif: finalExif,
+            embeddedSonyOptics: embeddedPayload,
+            fullSensorDimensions: fullDims
         )
     }
 
@@ -935,6 +1136,54 @@ private enum TIFFPreflightInspector {
 
     private static func readFirstUInt16(fh: FileHandle, entry: IFDEntry, littleEndian: Bool) -> UInt16? {
         readUInt16Array(fh: fh, entry: entry, littleEndian: littleEndian).first
+    }
+
+    private static func readInt16Array(fh: FileHandle, entry: IFDEntry, littleEndian: Bool) -> [Int16] {
+        guard entry.type == 3 || entry.type == 8,
+              let data = readTagData(fh: fh, entry: entry, littleEndian: littleEndian) else {
+            return []
+        }
+        let count = data.count / 2
+        return (0..<count).map { Int16(bitPattern: readUInt16(data, at: $0 * 2, littleEndian: littleEndian)) }
+    }
+
+    private static func readFirstUInt32FromRaw4(fh: FileHandle, entry: IFDEntry, littleEndian: Bool) -> UInt32? {
+        guard entry.count >= 1 else { return nil }
+        if entry.type == 4 || entry.type == 13 {
+            return readFirstUInt32(fh: fh, entry: entry, littleEndian: littleEndian)
+        }
+        if entry.type == 7 && entry.count >= 4 {
+            return readUInt32(entry.valueOrOffsetBytes, at: 0, littleEndian: littleEndian)
+        }
+        return nil
+    }
+
+    private static func sonyDecryptBuffer(_ data: inout Data, key: UInt32) {
+        let wordCount = data.count / 4
+        guard wordCount > 0 else { return }
+        var pad = [UInt32](repeating: 0, count: 128)
+        var k = key
+        for p in 0..<4 {
+            k = UInt32(truncatingIfNeeded: UInt64(k) &* 48828125 &+ 1)
+            pad[p] = k
+        }
+        pad[3] = (pad[3] << 1) | ((pad[0] ^ pad[2]) >> 31)
+        for p in 4..<127 {
+            pad[p] = ((pad[p - 4] ^ pad[p - 2]) << 1) | ((pad[p - 3] ^ pad[p - 1]) >> 31)
+        }
+        for p in 0..<127 {
+            pad[p] = pad[p].bigEndian
+        }
+        var p = 127
+        data.withUnsafeMutableBytes { raw in
+            let words = raw.bindMemory(to: UInt32.self)
+            for i in 0..<wordCount {
+                let nextPad = pad[(p + 1) & 127] ^ pad[(p + 65) & 127]
+                pad[p & 127] = nextPad
+                words[i] ^= nextPad
+                p &+= 1
+            }
+        }
     }
 
     private static func readUInt32Array(fh: FileHandle, entry: IFDEntry, littleEndian: Bool) -> [UInt32] {

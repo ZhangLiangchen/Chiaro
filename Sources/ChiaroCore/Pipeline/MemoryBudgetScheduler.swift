@@ -176,8 +176,8 @@ public final class MemoryBudgetScheduler: Sendable {
 
         if isLowTier {
             let decodeConcurrency = (isLargeFrame || backend == .ciraw9) ? 1 : 2
-            let minPoolBytes: UInt64 = 1_536 * 1024 * 1024
-            let maxPoolBytes: UInt64 = 4_096 * 1024 * 1024
+            let minPoolBytes: UInt64 = 1_024 * 1024 * 1024
+            let maxPoolBytes: UInt64 = 1_536 * 1024 * 1024
             let quarterRAM = physicalMemoryBytes / 4
             let poolBytes = Int(min(max(minPoolBytes, quarterRAM), maxPoolBytes))
 
@@ -198,12 +198,12 @@ public final class MemoryBudgetScheduler: Sendable {
         } else {
             let decodeConcurrency = (isLargeFrame || backend == .ciraw9) ? 2 : 3
             let encodeJobConcurrency = (isLargeFrame && outputFormats.contains(.avif)) ? 1 : 2
-            let minPoolBytes: UInt64 = 2_560 * 1024 * 1024
-            let maxPoolBytes: UInt64 = 4_096 * 1024 * 1024
+            let minPoolBytes: UInt64 = 1_280 * 1024 * 1024
+            let maxPoolBytes: UInt64 = 1_792 * 1024 * 1024
             let eighthRAM = physicalMemoryBytes / 8
             let poolBytes = Int(min(max(minPoolBytes, eighthRAM), maxPoolBytes))
             let avifThreads = 4
-            let maxInFlight = (isLargeFrame || outputFormats.contains(.avif)) ? 3 : 4
+            let maxInFlight = 3
 
             return PipelineBudget(
                 tier: .high32GBPlus,

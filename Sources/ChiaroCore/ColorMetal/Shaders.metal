@@ -1,3 +1,19 @@
+/*
+ * This file is part of Chiaro.
+ *
+ * Chiaro is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Includes Metal GPU ports of darktable (GPL-3.0-or-later) image quality engines:
+ *   - darktable/src/iop/hlreconstruct/opposed.c (inpaint opposed highlight reconstruction)
+ *   - darktable/src/iop/denoiseprofile.c (profiled GAT + À-trous wavelet + IGAT)
+ *   - darktable/src/iop/lens.cc (optical distortion/TCA/vignetting correction)
+ *   - darktable/src/iop/diffuse.c (anisotropic inverse-diffusion optical sharpening)
+ *   - darktable/src/iop/sigmoid.c (sigmoid tone mapper & hue/energy preservation)
+ */
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -255,123 +271,150 @@ inline float3 mean_other_unclipped_ref(float3 rgb, uint mask, thread uint& uncli
     return float3(meanVal);
 }
 
+/* darktable src/iop/hlreconstruct/opposed.c (_calc_linear_refavg, GPL-3.0-or-later) */
+inline float3 calc_linear_refavg(float3 rgb, uint mask, thread uint& unclippedCount) {
+    float sumCbrt = 0.0f;
+    unclippedCount = 0u;
+    if ((mask & 1u) == 0u) { sumCbrt += signed_cbrt(max(rgb.r, 0.0f)); unclippedCount++; }
+    if ((mask & 2u) == 0u) { sumCbrt += signed_cbrt(max(rgb.g, 0.0f)); unclippedCount++; }
+    if ((mask & 4u) == 0u) { sumCbrt += signed_cbrt(max(rgb.b, 0.0f)); unclippedCount++; }
+    if (unclippedCount == 0u) {
+        return float3(max(rgb.r, max(rgb.g, rgb.b)));
+    }
+    float avg = sumCbrt / float(unclippedCount);
+    return float3(avg * avg * avg);
+}
+
+/* Threadgroup-privatized 256-bin border + fallback chrominance histograms (6 * 256 uints). */
 kernel void opposed_inpaint_reduce_kernel(
     texture2d<half, access::read> inTex [[texture(0)]],
-    device float* groupAccumBuf [[buffer(0)]], // per group: [sumR, sumG, sumB, cntR, cntG, cntB]
+    device atomic_uint* chromaHistBuf [[buffer(0)]], // [0..2]: border 3x256, [3..5]: fallback 3x256
     constant HighlightReconUniforms& u [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]],
     uint2 tid [[thread_position_in_threadgroup]],
-    uint2 tgid [[threadgroup_position_in_grid]],
-    uint2 tgCount [[threadgroups_per_grid]]
+    uint2 tgid [[threadgroup_position_in_grid]]
 ) {
-    threadgroup float tgSum[256][3];
-    threadgroup uint tgCnt[256][3];
+    threadgroup atomic_uint tgHist[6][256];
+    threadgroup uchar tgMask[22][22];
 
     uint lid = tid.y * 16u + tid.x;
-    float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f;
-    uint n0 = 0u, n1 = 0u, n2 = 0u;
+    for (uint c = 0u; c < 6u; ++c) {
+        atomic_store_explicit(&tgHist[c][lid], 0u, memory_order_relaxed);
+    }
+
+    for (uint idx = lid; idx < 22u * 22u; idx += 256u) {
+        int ly = int(idx / 22u) - 3;
+        int lx = int(idx % 22u) - 3;
+        int gx = int(tgid.x) * 16 + lx;
+        int gy = int(tgid.y) * 16 + ly;
+        uchar isClipped = 0u;
+        if (gx >= 0 && gy >= 0 && gx < int(u.width) && gy < int(u.height)) {
+            uint m = uint(round(float(inTex.read(uint2(gx, gy)).a)));
+            isClipped = (m != 0u) ? 1u : 0u;
+        }
+        tgMask[idx / 22u][idx % 22u] = isClipped;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (gid.x < u.width && gid.y < u.height) {
         half4 px = inTex.read(gid);
-        float3 rgb = float3(px.rgb);
+        float3 rgb = max(float3(px.rgb), float3(0.0f));
         uint mask = uint(round(float(px.a)));
-        float maxRGB = max(rgb.r, max(rgb.g, rgb.b));
+        if (mask == 0u) {
+            float maxRGB = max(rgb.r, max(rgb.g, rgb.b));
+            bool nearClip = false;
+            for (int dy = -3; dy <= 3 && !nearClip; ++dy) {
+                for (int dx = -3; dx <= 3; ++dx) {
+                    if (tgMask[int(tid.y) + 3 + dy][int(tid.x) + 3 + dx] != 0u) {
+                        nearClip = true;
+                        break;
+                    }
+                }
+            }
 
-        if (maxRGB > 0.65f * u.minClipCeil) {
-            uint c0 = (mask & 1u) == 0u ? 1u : 0u;
-            uint c1 = (mask & 2u) == 0u ? 1u : 0u;
-            uint c2 = (mask & 4u) == 0u ? 1u : 0u;
-            if (c0 + c1 + c2 >= 2u) {
-                if (c0 != 0u) {
-                    s0 = clamp(rgb.r - (rgb.g + rgb.b) * 0.5f, -4.0f, 4.0f);
-                    n0 = 1u;
+            float rC = signed_cbrt(rgb.r);
+            float gC = signed_cbrt(rgb.g);
+            float bC = signed_cbrt(rgb.b);
+            float refR = pow((gC + bC) * 0.5f, 3.0f);
+            float refG = pow((rC + bC) * 0.5f, 3.0f);
+            float refB = pow((rC + gC) * 0.5f, 3.0f);
+            float3 diff = float3(rgb.r - refR, rgb.g - refG, rgb.b - refB);
+
+            if (nearClip && maxRGB > 0.20f * u.minClipCeil) {
+                for (uint c = 0u; c < 3u; ++c) {
+                    float d = clamp(diff[c], -1.0f, 1.0f);
+                    uint bin = uint(clamp(int(floor((d + 1.0f) * 0.5f * 255.0f + 0.5f)), 0, 255));
+                    atomic_fetch_add_explicit(&tgHist[c][bin], 1u, memory_order_relaxed);
                 }
-                if (c1 != 0u) {
-                    s1 = clamp(rgb.g - (rgb.r + rgb.b) * 0.5f, -4.0f, 4.0f);
-                    n1 = 1u;
-                }
-                if (c2 != 0u) {
-                    s2 = clamp(rgb.b - (rgb.r + rgb.g) * 0.5f, -4.0f, 4.0f);
-                    n2 = 1u;
+            } else if (maxRGB > 0.55f * u.minClipCeil) {
+                for (uint c = 0u; c < 3u; ++c) {
+                    float d = clamp(diff[c], -1.0f, 1.0f);
+                    uint bin = uint(clamp(int(floor((d + 1.0f) * 0.5f * 255.0f + 0.5f)), 0, 255));
+                    atomic_fetch_add_explicit(&tgHist[3u + c][bin], 1u, memory_order_relaxed);
                 }
             }
         }
     }
-
-    tgSum[lid][0] = s0; tgSum[lid][1] = s1; tgSum[lid][2] = s2;
-    tgCnt[lid][0] = n0; tgCnt[lid][1] = n1; tgCnt[lid][2] = n2;
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-        if (lid < stride) {
-            for (int c = 0; c < 3; ++c) {
-                tgSum[lid][c] += tgSum[lid + stride][c];
-                tgCnt[lid][c] += tgCnt[lid + stride][c];
-            }
+    for (uint c = 0u; c < 6u; ++c) {
+        uint cnt = atomic_load_explicit(&tgHist[c][lid], memory_order_relaxed);
+        if (cnt > 0u) {
+            atomic_fetch_add_explicit(&chromaHistBuf[c * 256u + lid], cnt, memory_order_relaxed);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    if (lid == 0u) {
-        uint gIdx = tgid.y * tgCount.x + tgid.x;
-        uint base = gIdx * 6u;
-        groupAccumBuf[base + 0u] = tgSum[0][0];
-        groupAccumBuf[base + 1u] = tgSum[0][1];
-        groupAccumBuf[base + 2u] = tgSum[0][2];
-        groupAccumBuf[base + 3u] = float(tgCnt[0][0]);
-        groupAccumBuf[base + 4u] = float(tgCnt[0][1]);
-        groupAccumBuf[base + 5u] = float(tgCnt[0][2]);
     }
 }
 
 kernel void opposed_inpaint_finalize_kernel(
-    device const float* groupAccumBuf [[buffer(0)]],
+    device const uint* chromaHistBuf [[buffer(0)]],
     device float* finalChromaBuf [[buffer(1)]], // [chromaR, chromaG, chromaB, 0]
-    constant uint& groupCount [[buffer(2)]],
     uint lid [[thread_index_in_threadgroup]]
 ) {
-    threadgroup float tgSum[256][3];
-    threadgroup uint tgCnt[256][3];
-
-    float localSum[3] = { 0.0f, 0.0f, 0.0f };
-    float localComp[3] = { 0.0f, 0.0f, 0.0f };
-    uint localCnt[3] = { 0u, 0u, 0u };
-
-    for (uint g = lid; g < groupCount; g += 256u) {
-        uint base = g * 6u;
-        for (int c = 0; c < 3; ++c) {
-            float val = groupAccumBuf[base + uint(c)];
-            float y = val - localComp[c];
-            float t = localSum[c] + y;
-            localComp[c] = (t - localSum[c]) - y;
-            localSum[c] = t;
-            localCnt[c] += uint(round(groupAccumBuf[base + 3u + uint(c)]));
+    if (lid < 3u) {
+        uint borderBase = lid * 256u;
+        uint fallbackBase = (lid + 3u) * 256u;
+        uint borderTotal = 0u;
+        uint fallbackTotal = 0u;
+        for (uint b = 0u; b < 256u; ++b) {
+            borderTotal += chromaHistBuf[borderBase + b];
+            fallbackTotal += chromaHistBuf[fallbackBase + b];
         }
-    }
 
-    for (int c = 0; c < 3; ++c) {
-        tgSum[lid][c] = localSum[c];
-        tgCnt[lid][c] = localCnt[c];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
-        if (lid < stride) {
-            for (int c = 0; c < 3; ++c) {
-                tgSum[lid][c] += tgSum[lid + stride][c];
-                tgCnt[lid][c] += tgCnt[lid + stride][c];
+        uint useBase = (borderTotal >= 64u) ? borderBase : ((fallbackTotal > 0u) ? fallbackBase : borderBase);
+        uint total = (borderTotal >= 64u) ? borderTotal : ((fallbackTotal > 0u) ? fallbackTotal : borderTotal);
+        if (total == 0u) {
+            finalChromaBuf[lid] = 0.0f;
+        } else {
+            uint halfTarget = (total + 1u) / 2u;
+            uint cum = 0u;
+            uint medianBin = 128u;
+            for (uint b = 0u; b < 256u; ++b) {
+                cum += chromaHistBuf[useBase + b];
+                if (cum >= halfTarget) {
+                    medianBin = b;
+                    break;
+                }
             }
+            float val = (float(medianBin) / 255.0f) * 2.0f - 1.0f;
+            finalChromaBuf[lid] = clamp(val, -0.5f, 0.5f);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-
     if (lid == 0u) {
-        for (int c = 0; c < 3; ++c) {
-            uint cnt = tgCnt[0][c];
-            finalChromaBuf[c] = cnt > 0u ? clamp(tgSum[0][c] / float(cnt), -0.5f, 0.5f) : 0.0f;
-        }
         finalChromaBuf[3] = 0.0f;
     }
+}
+
+inline float median_sort_25(thread float vals[25], uint count) {
+    for (uint i = 1u; i < count; ++i) {
+        float key = vals[i];
+        int j = int(i) - 1;
+        while (j >= 0 && vals[j] > key) {
+            vals[j + 1] = vals[j];
+            --j;
+        }
+        vals[j + 1] = key;
+    }
+    return vals[count / 2u];
 }
 
 kernel void opposed_inpaint_apply_kernel(
@@ -385,7 +428,7 @@ kernel void opposed_inpaint_apply_kernel(
         return;
     }
     half4 px = inTex.read(gid);
-    float3 rgb = float3(px.rgb);
+    float3 rgb = max(float3(px.rgb), float3(0.0f));
     uint mask = uint(round(float(px.a)));
 
     if (mask == 0u) {
@@ -401,44 +444,58 @@ kernel void opposed_inpaint_apply_kernel(
 
     float3 globalChroma = float3(finalChromaBuf[0], finalChromaBuf[1], finalChromaBuf[2]);
 
-    // Local 7x7 opposed chrominance estimate blended with global chrominance
-    float3 localSum = float3(0.0f);
-    float3 localCnt = float3(0.0f);
-    int x0 = max(0, int(gid.x) - 3);
-    int x1 = min(int(u.width) - 1, int(gid.x) + 3);
-    int y0 = max(0, int(gid.y) - 3);
-    int y1 = min(int(u.height) - 1, int(gid.y) + 3);
+    // Local 5x5 median opposed chrominance estimate blended with global median chrominance
+    float valsR[25];
+    float valsG[25];
+    float valsB[25];
+    uint cnt = 0u;
+    int x0 = max(0, int(gid.x) - 2);
+    int x1 = min(int(u.width) - 1, int(gid.x) + 2);
+    int y0 = max(0, int(gid.y) - 2);
+    int y1 = min(int(u.height) - 1, int(gid.y) + 2);
 
     for (int ny = y0; ny <= y1; ++ny) {
         for (int nx = x0; nx <= x1; ++nx) {
             half4 npx = inTex.read(uint2(nx, ny));
             uint nmask = uint(round(float(npx.a)));
-            if (nmask == 0u) {
-                float3 nrgb = float3(npx.rgb);
-                if (max(nrgb.r, max(nrgb.g, nrgb.b)) > 0.55f * u.minClipCeil) {
-                    localSum.r += nrgb.r - 0.5f * (nrgb.g + nrgb.b);
-                    localSum.g += nrgb.g - 0.5f * (nrgb.r + nrgb.b);
-                    localSum.b += nrgb.b - 0.5f * (nrgb.r + nrgb.g);
-                    localCnt += float3(1.0f);
+            if (nmask == 0u && cnt < 25u) {
+                float3 nrgb = max(float3(npx.rgb), float3(0.0f));
+                if (max(nrgb.r, max(nrgb.g, nrgb.b)) > 0.25f * u.minClipCeil) {
+                    float rC = signed_cbrt(nrgb.r);
+                    float gC = signed_cbrt(nrgb.g);
+                    float bC = signed_cbrt(nrgb.b);
+                    valsR[cnt] = clamp(nrgb.r - pow((gC + bC) * 0.5f, 3.0f), -0.5f, 0.5f);
+                    valsG[cnt] = clamp(nrgb.g - pow((rC + bC) * 0.5f, 3.0f), -0.5f, 0.5f);
+                    valsB[cnt] = clamp(nrgb.b - pow((rC + gC) * 0.5f, 3.0f), -0.5f, 0.5f);
+                    ++cnt;
                 }
             }
         }
     }
 
     float3 chroma = globalChroma;
-    for (int c = 0; c < 3; ++c) {
-        if (localCnt[c] >= 4.0f) {
-            float lc = clamp(localSum[c] / localCnt[c], -0.5f, 0.5f);
-            float w = clamp(localCnt[c] / 16.0f, 0.0f, 0.75f);
-            chroma[c] = mix(globalChroma[c], lc, w);
-        }
+    if (cnt >= 4u) {
+        float3 localMed = float3(
+            median_sort_25(valsR, cnt),
+            median_sort_25(valsG, cnt),
+            median_sort_25(valsB, cnt)
+        );
+        float w = clamp(float(cnt) / 12.0f, 0.0f, 0.75f);
+        chroma = mix(globalChroma, localMed, w);
     }
 
     uint unclippedCount = 0u;
-    float ref = mean_other_unclipped_ref(rgb, mask, unclippedCount).x;
-    if ((mask & 1u) != 0u) rgb.r = max(rgb.r, ref + chroma.r);
-    if ((mask & 2u) != 0u) rgb.g = max(rgb.g, ref + chroma.g);
-    if ((mask & 4u) != 0u) rgb.b = max(rgb.b, ref + chroma.b);
+    float ref = calc_linear_refavg(rgb, mask, unclippedCount).x;
+    if (mask == 5u) {
+        // Both R and B clipped above unclipped G: replace clipped R & B with opposed reconstruction
+        // to eliminate synthetic/tungsten magenta spikes while preserving G.
+        rgb.r = max(0.0f, ref + chroma.r);
+        rgb.b = max(0.0f, ref + chroma.b);
+    } else {
+        if ((mask & 1u) != 0u) rgb.r = max(rgb.r, ref + chroma.r);
+        if ((mask & 2u) != 0u) rgb.g = max(rgb.g, ref + chroma.g);
+        if ((mask & 4u) != 0u) rgb.b = max(rgb.b, ref + chroma.b);
+    }
 
     outTex.write(half4(half3(max(rgb, float3(0.0f))), 1.0h), gid);
 }
@@ -967,7 +1024,7 @@ kernel void orient_crop_resize_kernel(
 struct ToneMapGamutUniforms {
     float midtoneAnchorP;
     float targetHeadroomStops;
-    uint sdrToneMapper; // 0=agx, 1=neutralRational, 2=openDRT
+    uint sdrToneMapper; // 0=agx, 1=neutralRational, 2=openDRT, 3=sigmoid
     uint isSRGBBase;
     float sdrExposureLinear;
     float sdrHighlightCompression;
@@ -978,6 +1035,47 @@ struct ToneMapGamutUniforms {
     float pad0;
     float pad1;
 };
+
+/* darktable src/iop/sigmoid.c (GPL-3.0-or-later) midtone-anchored C1 generalized log-logistic + primary inset */
+inline float sigmoid_anchored_loglogistic(float x, float P, float skew) {
+    if (x <= P) {
+        return max(x, 0.0f);
+    }
+    float paperPower = pow(5.0f, -skew);
+    float pOverW = clamp(P, 0.5f, 0.96f);
+    float pInv = pow(pOverW, 1.0f / paperPower);
+    float wgr = (1.0f / max(pInv, 1e-5f)) - 1.0f;
+    float filmPower = 1.0f / max(paperPower * (1.0f - pInv), 1e-4f);
+    float paperExp = pow(P, filmPower) * wgr;
+    float fr = pow(max(x, 0.0f), filmPower);
+    if (!isfinite(fr)) {
+        return 1.0f;
+    }
+    return clamp(pow(fr / (paperExp + fr), paperPower), 0.0f, 1.0f);
+}
+
+inline float3 sigmoid_preserve_hue_and_energy(float3 base, float3 perCh, float huePreservation) {
+    uint maxC = (base.r >= base.g && base.r >= base.b) ? 0u : ((base.g >= base.b) ? 1u : 2u);
+    uint minC = (base.r <= base.g && base.r <= base.b) ? 0u : ((base.g <= base.b) ? 1u : 2u);
+    uint midC = 3u - maxC - minC;
+    if (maxC == minC) {
+        return perCh;
+    }
+
+    float chroma = base[maxC] - base[minC];
+    float midHue = (chroma > 1e-6f)
+        ? (perCh[minC] + (perCh[maxC] - perCh[minC]) * ((base[midC] - base[minC]) / chroma))
+        : perCh[midC];
+    float3 hueCorrected = perCh;
+    hueCorrected[midC] = mix(perCh[midC], midHue, huePreservation);
+
+    float ePer = dot(perCh, kRec2020Luma);
+    float eHue = dot(hueCorrected, kRec2020Luma);
+    if (eHue > 1e-6f) {
+        hueCorrected *= mix(1.0f, ePer / eHue, 0.5f * huePreservation);
+    }
+    return clamp(hueCorrected, float3(0.0f), float3(1.0f));
+}
 
 inline float rational_shoulder(float x, float P, float Lmax, float p) {
     if (x <= P || Lmax <= P + 1e-5f) {
@@ -1145,7 +1243,7 @@ kernel void dual_branch_tonemap_gamut_kernel(
             float desat = 0.35f * smoothstep(P, 2.5f, maxC);
             sdr2020 = mix(mixed, float3(yOut), desat);
         }
-    } else { // .openDRT
+    } else if (u.sdrToneMapper == 2u) { // .openDRT
         float norm = sqrt(dot(rgbS * rgbS, float3(0.30f, 0.55f, 0.15f)));
         if (norm <= P) {
             sdr2020 = rgbS;
@@ -1155,6 +1253,30 @@ kernel void dual_branch_tonemap_gamut_kernel(
             float Y_out = dot(scaled, kRec2020Luma);
             float purity = pow(clamp((norm - P) / (norm + 0.5f), 0.0f, 1.0f), 1.5f);
             sdr2020 = mix(scaled, float3(Y_out), 0.45f * purity);
+        }
+    } else { // .sigmoid (darktable src/iop/sigmoid.c GPL-3.0-or-later)
+        float3x3 kM_Sigmoid_Inset_2020 = make_mat3(
+            float3(0.88f, 0.10f, 0.02f),
+            float3(0.06f, 0.89f, 0.05f),
+            float3(0.02f, 0.13f, 0.85f)
+        );
+        float3x3 kM_Sigmoid_Outset_2020 = make_mat3(
+            float3(+1.14538790f, -0.12583995f, -0.01954795f),
+            float3(-0.07635919f, +1.14172266f, -0.06536347f),
+            float3(-0.01527184f, -0.17165547f, +1.18692731f)
+        );
+        float3 renderingRGB = kM_Sigmoid_Inset_2020 * rgbS;
+        if (max(renderingRGB.r, max(renderingRGB.g, renderingRGB.b)) <= P) {
+            sdr2020 = rgbS;
+        } else {
+            float skew = mix(-0.75f, 0.75f, clamp(u.sdrHighlightCompression * 0.01f, 0.0f, 1.0f));
+            float3 perCh = float3(
+                sigmoid_anchored_loglogistic(renderingRGB.r, P, skew),
+                sigmoid_anchored_loglogistic(renderingRGB.g, P, skew),
+                sigmoid_anchored_loglogistic(renderingRGB.b, P, skew)
+            );
+            float3 corrected = sigmoid_preserve_hue_and_energy(renderingRGB, perCh, 0.35f);
+            sdr2020 = max(kM_Sigmoid_Outset_2020 * corrected, float3(0.0f));
         }
     }
 
@@ -1773,4 +1895,585 @@ kernel void dual_zone_histogram_kernel(
         bin = uint(clamp(128 + int(floor(ev / 4.0f * 128.0f)), 128, 255));
     }
     atomic_fetch_add_explicit(&bins[bin], 1u, memory_order_relaxed);
+}
+
+// MARK: - Stage 2A: Profiled Linear Wavelet Denoise (darktable denoiseprofile.c + Makitalo-Foi IGAT, GPL-3.0-or-later)
+
+struct ProfiledDenoiseUniforms {
+    uint width;
+    uint height;
+    uint scaleIndex;
+    uint stepSize;
+    float4 aCoeffs;      // xyz = a[0..2], w = sb2[scaleIndex]
+    float4 sigmaG2;      // xyz = b[c] / (a[c]*a[c]), w = 0
+    float4 yZeroFloor;   // xyz = 2 * sqrt(0.375 + sigmaG2[c]) * 1.0001, w = 0
+    float lumaLambda;
+    float chromaLambda;
+    float pad0;
+    float pad1;
+    uint srcOffsetY;
+    uint writeOffsetY;
+    uint validHeight;
+    uint flags;          // bit 0: lumaOrChromaRefTex is full-frame, bit 1: outTex is full-frame
+};
+
+kernel void profiled_denoise_gat_opponent_kernel(
+    texture2d<half, access::read> inTex [[texture(0)]],
+    texture2d<float, access::write> outOppTex [[texture(1)]],
+    texture2d<float, access::write> accumTex [[texture(2)]],
+    constant ProfiledDenoiseUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    uint2 srcCoord = uint2(gid.x, gid.y + u.srcOffsetY);
+    float3 rgb = max(float3(inTex.read(srcCoord).rgb), float3(0.0f));
+    float3 a = max(u.aCoeffs.xyz, float3(1e-8f));
+    float3 sg2 = max(u.sigmaG2.xyz, float3(0.0f));
+
+    // Per-channel Generalized Anscombe Transform (unit noise variance per RGB channel, zero cross-channel luma->chroma leakage)
+    float3 yRGB = 2.0f * sqrt(rgb / a + float3(0.375f) + sg2);
+
+    outOppTex.write(float4(yRGB, 1.0f), gid);
+    accumTex.write(float4(0.0f), gid);
+}
+
+kernel void profiled_denoise_atrous_h_kernel(
+    texture2d<float, access::read> curTex [[texture(0)]],
+    texture2d<float, access::write> tmpTex [[texture(1)]],
+    constant ProfiledDenoiseUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    constexpr float kW[5] = { 0.0625f, 0.25f, 0.375f, 0.25f, 0.0625f };
+    int step = int(u.stepSize);
+    int maxX = int(u.width) - 1;
+    int x = int(gid.x);
+
+    float3 sum = float3(0.0f);
+    for (int k = 0; k < 5; ++k) {
+        int sx = clamp(x + (k - 2) * step, 0, maxX);
+        sum += kW[k] * curTex.read(uint2(sx, gid.y)).rgb;
+    }
+    tmpTex.write(float4(sum, 1.0f), gid);
+}
+
+kernel void profiled_denoise_atrous_v_detail_kernel(
+    texture2d<float, access::read> curTex [[texture(0)]],
+    texture2d<float, access::read> tmpTex [[texture(1)]],
+    texture2d<float, access::write> coarseTex [[texture(2)]],
+    texture2d<float, access::write> detailTex [[texture(3)]],
+    constant ProfiledDenoiseUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    constexpr float kW[5] = { 0.0625f, 0.25f, 0.375f, 0.25f, 0.0625f };
+    int step = int(u.stepSize);
+    int maxY = int(u.height) - 1;
+    int y = int(gid.y);
+
+    float3 coarse = float3(0.0f);
+    for (int k = 0; k < 5; ++k) {
+        int sy = clamp(y + (k - 2) * step, 0, maxY);
+        coarse += kW[k] * tmpTex.read(uint2(gid.x, sy)).rgb;
+    }
+    float3 cur = curTex.read(gid).rgb;
+    coarseTex.write(float4(coarse, 1.0f), gid);
+    detailTex.write(float4(cur - coarse, 0.0f), gid);
+}
+
+kernel void profiled_denoise_shrink_accum_kernel(
+    texture2d<float, access::read> detailTex [[texture(0)]],
+    texture2d<float, access::read> accumInTex [[texture(1)]],
+    texture2d<float, access::write> accumOutTex [[texture(2)]],
+    constant ProfiledDenoiseUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    int maxX = int(u.width) - 1;
+    int maxY = int(u.height) - 1;
+    int x = int(gid.x);
+    int y = int(gid.y);
+    int winStep = max(1, int(u.stepSize) / 2);
+
+    float3 m2 = float3(0.0f);
+    for (int dy = -2; dy <= 2; ++dy) {
+        int sy = clamp(y + dy * winStep, 0, maxY);
+        for (int dx = -2; dx <= 2; ++dx) {
+            int sx = clamp(x + dx * winStep, 0, maxX);
+            float3 d = detailTex.read(uint2(sx, sy)).rgb;
+            m2 += d * d;
+        }
+    }
+    float3 sigmaY2 = m2 * (1.0f / 25.0f);
+
+    // Use per-channel band variance: pad0 == 1.0 selects chroma-calibrated demosaic+Rec.2020 band variance across R,G,B;
+    // pad0 == 0.0 selects exact 2D B3-spline white-noise variance across R,G,B for crisp luma preservation.
+    constexpr float kChromaBandVar[5] = { 4.20f, 2.20f, 1.20f, 0.60f, 0.30f };
+    bool isChroma = (u.pad0 > 0.5f);
+    float lumaScale0Boost = (!isChroma && u.scaleIndex == 0u) ? 6.2f : 2.5f;
+    float sb2Scalar = isChroma
+        ? kChromaBandVar[min(u.scaleIndex, 4u)]
+        : (max(u.aCoeffs.w, 1e-8f) * lumaScale0Boost);
+    float activeLambda = isChroma ? u.chromaLambda : u.lumaLambda;
+    float3 sb2 = float3(sb2Scalar);
+    float3 sigmaX = sqrt(max(sigmaY2 - sb2, float3(0.25f) * sb2));
+    float3 T = activeLambda * (sb2 / sigmaX);
+
+    float3 wCenter = detailTex.read(gid).rgb;
+    float3 shrunk;
+    if (activeLambda <= 0.0f) {
+        shrunk = wCenter;
+    } else {
+        // Non-negative Garrote shrinkage: exact noise deadzone (|w| <= T -> 0) with O(T^2/|w|) edge bias,
+        // preventing bright highlight neighbors from bleeding into pure black (0,0,0).
+        float3 r = T / max(abs(wCenter), float3(1e-6f));
+        shrunk = wCenter * max(float3(1.0f) - r * r, float3(0.0f));
+    }
+
+    float3 prevAccum = accumInTex.read(gid).rgb;
+    accumOutTex.write(float4(prevAccum + shrunk, 0.0f), gid);
+}
+
+inline float3 eval_makitalo_foi_igat(float3 yVec, constant ProfiledDenoiseUniforms& u) {
+    constexpr float kSqrt3Over2 = 1.224744871f;
+    float3 a = max(u.aCoeffs.xyz, float3(1e-8f));
+    float3 sg2 = max(u.sigmaG2.xyz, float3(0.0f));
+    float3 rgbOut = float3(0.0f);
+
+    for (int c = 0; c < 3; ++c) {
+        float y = yVec[c];
+        if (y < u.yZeroFloor[c]) {
+            rgbOut[c] = 0.0f;
+        } else {
+            float ySafe = max(y, 1e-4f);
+            float invY = 1.0f / ySafe;
+            float invY2 = invY * invY;
+            float invY3 = invY2 * invY;
+            float x = a[c] * (0.25f * ySafe * ySafe
+                              + 0.25f * kSqrt3Over2 * invY
+                              - 1.375f * invY2
+                              + 0.625f * kSqrt3Over2 * invY3
+                              - 0.125f - sg2[c]);
+            rgbOut[c] = isfinite(x) ? max(x, 0.0f) : 0.0f;
+        }
+    }
+    return rgbOut;
+}
+
+kernel void profiled_denoise_igat_rgb_kernel(
+    texture2d<float, access::read> accumTex [[texture(0)]],
+    texture2d<float, access::read> coarseTex [[texture(1)]],
+    texture2d<half, access::read> lumaOrChromaRefTex [[texture(2)]],
+    texture2d<half, access::write> outTex [[texture(3)]],
+    texture2d<half, access::read> origInputTex [[texture(4)]],
+    constant ProfiledDenoiseUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    bool writeToFullFrame = (u.flags & 2u) != 0u;
+    if (writeToFullFrame && (gid.y < u.writeOffsetY || gid.y >= u.writeOffsetY + u.validHeight)) {
+        return;
+    }
+
+    uint2 fullCoord = uint2(gid.x, gid.y + u.srcOffsetY);
+    uint2 outCoord = writeToFullFrame ? fullCoord : gid;
+
+    float3 origRGB = float3(origInputTex.read(fullCoord).rgb);
+    if (origRGB.r <= 0.0f && origRGB.g <= 0.0f && origRGB.b <= 0.0f) {
+        outTex.write(half4(0.0h, 0.0h, 0.0h, 1.0h), outCoord);
+        return;
+    }
+    float3 yVec = accumTex.read(gid).rgb + coarseTex.read(gid).rgb;
+    float3 denoisedRGB = eval_makitalo_foi_igat(yVec, u);
+
+    // pad1 == 0.0: pure write of intermediate chroma-denoised RGB (before luma combine)
+    // pad1 == 1.0: this pass computed luma-denoised RGB, and lumaOrChromaRefTex holds chroma-denoised RGB
+    // pad1 == 2.0: lumaStrength == 0, lumaOrChromaRefTex holds original input RGB for crisp luminance
+    float3 rgbOut;
+    if (u.pad1 < 0.5f) {
+        rgbOut = denoisedRGB;
+    } else {
+        uint2 refCoord = ((u.flags & 1u) != 0u) ? fullCoord : gid;
+        float3 refRGB = max(float3(lumaOrChromaRefTex.read(refCoord).rgb), float3(0.0f));
+        float3 chromaRGB = (u.pad1 > 1.5f) ? denoisedRGB : refRGB;
+        float3 lumaRGB = (u.pad1 > 1.5f) ? refRGB : denoisedRGB;
+
+        float yLuma = max(dot(lumaRGB, kRec2020Luma), 0.0f);
+        float yChroma = max(dot(chromaRGB, kRec2020Luma), 0.0f);
+        float3 addRGB = chromaRGB + float3(yLuma - yChroma);
+        float minComp = min(addRGB.r, min(addRGB.g, addRGB.b));
+        if (minComp < 0.0f) {
+            if (yLuma <= 0.0f) {
+                rgbOut = float3(0.0f);
+            } else {
+                float3 chromaDiff = chromaRGB - float3(yChroma);
+                float minDiff = min(chromaDiff.r, min(chromaDiff.g, chromaDiff.b));
+                float scale = (minDiff < -1e-6f) ? clamp(yLuma / (-minDiff), 0.0f, 1.0f) : 1.0f;
+                rgbOut = max(float3(yLuma) + chromaDiff * scale, float3(0.0f));
+            }
+        } else {
+            rgbOut = addRGB;
+        }
+    }
+
+    outTex.write(half4(half3(max(rgbOut, float3(0.0f))), 1.0h), outCoord);
+}
+
+// MARK: - Stage 2B: Unified 256x192 Optical Correction (darktable lens.cc + Lensfun, GPL-3.0-or-later)
+
+struct OpticalCorrectionUniforms {
+    uint width;
+    uint height;
+    uint lutWidth;
+    uint lutHeight;
+    float vignettingStrength;
+    uint applyGeometry;
+    uint applyVignetting;
+    uint pad0;
+};
+
+inline float2 sample_warp_lut_bilinear(
+    texture2d_array<float, access::read> warpTex,
+    float2 uv,
+    uint slice,
+    uint lutW,
+    uint lutH
+) {
+    float fx = clamp(uv.x, 0.0f, 1.0f) * float(lutW - 1u);
+    float fy = clamp(uv.y, 0.0f, 1.0f) * float(lutH - 1u);
+    uint x0 = min(uint(floor(fx)), lutW - 1u);
+    uint y0 = min(uint(floor(fy)), lutH - 1u);
+    uint x1 = min(x0 + 1u, lutW - 1u);
+    uint y1 = min(y0 + 1u, lutH - 1u);
+    float tx = fx - float(x0);
+    float ty = fy - float(y0);
+    float2 p00 = warpTex.read(uint2(x0, y0), slice).rg;
+    float2 p10 = warpTex.read(uint2(x1, y0), slice).rg;
+    float2 p01 = warpTex.read(uint2(x0, y1), slice).rg;
+    float2 p11 = warpTex.read(uint2(x1, y1), slice).rg;
+    return mix(mix(p00, p10, tx), mix(p01, p11, tx), ty);
+}
+
+inline float sample_vig_lut_bilinear(
+    texture2d<half, access::read> vigTex,
+    float2 uv,
+    uint lutW,
+    uint lutH
+) {
+    float fx = clamp(uv.x, 0.0f, 1.0f) * float(lutW - 1u);
+    float fy = clamp(uv.y, 0.0f, 1.0f) * float(lutH - 1u);
+    uint x0 = min(uint(floor(fx)), lutW - 1u);
+    uint y0 = min(uint(floor(fy)), lutH - 1u);
+    uint x1 = min(x0 + 1u, lutW - 1u);
+    uint y1 = min(y0 + 1u, lutH - 1u);
+    float tx = fx - float(x0);
+    float ty = fy - float(y0);
+    float v00 = float(vigTex.read(uint2(x0, y0)).r);
+    float v10 = float(vigTex.read(uint2(x1, y0)).r);
+    float v01 = float(vigTex.read(uint2(x0, y1)).r);
+    float v11 = float(vigTex.read(uint2(x1, y1)).r);
+    return mix(mix(v00, v10, tx), mix(v01, v11, tx), ty);
+}
+
+inline float sample_channel_catmull_rom(
+    texture2d<half, access::read> inTex,
+    float2 uvSrc,
+    uint channelIndex,
+    uint width,
+    uint height
+) {
+    float px = clamp(uvSrc.x, 0.0f, 1.0f) * float(width - 1u);
+    float py = clamp(uvSrc.y, 0.0f, 1.0f) * float(height - 1u);
+    int ix = int(floor(px));
+    int iy = int(floor(py));
+    float tx = px - float(ix);
+    float ty = py - float(iy);
+
+    float wx[4];
+    wx[0] = ((-0.5f * tx + 1.0f) * tx - 0.5f) * tx;
+    wx[1] = ((1.5f * tx - 2.5f) * tx) * tx + 1.0f;
+    wx[2] = ((-1.5f * tx + 2.0f) * tx + 0.5f) * tx;
+    wx[3] = ((0.5f * tx - 0.5f) * tx) * tx;
+
+    float wy[4];
+    wy[0] = ((-0.5f * ty + 1.0f) * ty - 0.5f) * ty;
+    wy[1] = ((1.5f * ty - 2.5f) * ty) * ty + 1.0f;
+    wy[2] = ((-1.5f * ty + 2.0f) * ty + 0.5f) * ty;
+    wy[3] = ((0.5f * ty - 0.5f) * ty) * ty;
+
+    int maxX = int(width) - 1;
+    int maxY = int(height) - 1;
+    float sum = 0.0f;
+    for (int dy = -1; dy <= 2; ++dy) {
+        int sy = clamp(iy + dy, 0, maxY);
+        float rowSum = 0.0f;
+        for (int dx = -1; dx <= 2; ++dx) {
+            int sx = clamp(ix + dx, 0, maxX);
+            float val = float(inTex.read(uint2(sx, sy))[channelIndex]);
+            rowSum += wx[dx + 1] * val;
+        }
+        sum += wy[dy + 1] * rowSum;
+    }
+    return isfinite(sum) ? max(sum, 0.0f) : 0.0f;
+}
+
+kernel void optical_correction_kernel(
+    texture2d<half, access::read> inTex [[texture(0)]],
+    texture2d_array<float, access::read> warpTex [[texture(1)]],
+    texture2d<half, access::read> vigTex [[texture(2)]],
+    texture2d<half, access::write> outTex [[texture(3)]],
+    constant OpticalCorrectionUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+
+    float2 uvDst = float2(
+        (u.width > 1u) ? (float(gid.x) / float(u.width - 1u)) : 0.0f,
+        (u.height > 1u) ? (float(gid.y) / float(u.height - 1u)) : 0.0f
+    );
+
+    float3 rgb;
+    if (u.applyGeometry != 0u) {
+        float2 uvR = sample_warp_lut_bilinear(warpTex, uvDst, 0u, u.lutWidth, u.lutHeight);
+        float2 uvG = sample_warp_lut_bilinear(warpTex, uvDst, 1u, u.lutWidth, u.lutHeight);
+        float2 uvB = sample_warp_lut_bilinear(warpTex, uvDst, 2u, u.lutWidth, u.lutHeight);
+        rgb.r = sample_channel_catmull_rom(inTex, uvR, 0u, u.width, u.height);
+        rgb.g = sample_channel_catmull_rom(inTex, uvG, 1u, u.width, u.height);
+        rgb.b = sample_channel_catmull_rom(inTex, uvB, 2u, u.width, u.height);
+    } else {
+        rgb = max(float3(inTex.read(gid).rgb), float3(0.0f));
+    }
+
+    if (u.applyVignetting != 0u) {
+        float vigFull = sample_vig_lut_bilinear(vigTex, uvDst, u.lutWidth, u.lutHeight);
+        if (isfinite(vigFull)) {
+            float gain = mix(1.0f, clamp(vigFull, 0.25f, 8.0f), clamp(u.vignettingStrength, 0.0f, 1.0f));
+            rgb *= gain;
+        }
+    }
+
+    outTex.write(half4(half3(max(rgb, float3(0.0f))), 1.0h), gid);
+}
+
+// MARK: - Stage 2C: Halo-Free Clarity & Physical Inverse-Diffusion Optical Sharpness
+
+struct ClarityUniforms {
+    uint width;
+    uint height;
+    uint stride;
+    float clarity; // -100..+100
+};
+
+kernel void clarity_bilateral_h_kernel(
+    texture2d<half, access::read> inTex [[texture(0)]],
+    texture2d<half, access::write> tmpTex [[texture(1)]],
+    constant ClarityUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    constexpr float kEps = 0.0009765625f; // 2^-10
+    constexpr float kSigmaR = 0.85f;
+    float invTwoSigmaR2 = 0.5f / (kSigmaR * kSigmaR);
+    int stride = max(int(u.stride), 1);
+    float sigmaS = 2.0f * float(stride);
+    float invTwoSigmaS2 = 0.5f / (sigmaS * sigmaS);
+
+    float Yc = max(dot(max(float3(inTex.read(gid).rgb), float3(0.0f)), kRec2020Luma), 0.0f);
+    float Lc = log2(Yc + kEps);
+
+    int maxX = int(u.width) - 1;
+    int x = int(gid.x);
+    float sumW = 0.0f;
+    float sumL = 0.0f;
+
+    for (int k = -4; k <= 4; ++k) {
+        int sx = clamp(x + k * stride, 0, maxX);
+        float dx = float(k * stride);
+        float Yq = max(dot(max(float3(inTex.read(uint2(sx, gid.y)).rgb), float3(0.0f)), kRec2020Luma), 0.0f);
+        float Lq = log2(Yq + kEps);
+        float dL = Lq - Lc;
+        float w = exp(-(dx * dx) * invTwoSigmaS2 - (dL * dL) * invTwoSigmaR2);
+        sumL += w * Lq;
+        sumW += w;
+    }
+
+    float Lhoriz = (sumW > 1e-6f) ? (sumL / sumW) : Lc;
+    tmpTex.write(half4(half(Lc), half(Lhoriz), 0.0h, 1.0h), gid);
+}
+
+kernel void clarity_bilateral_v_apply_kernel(
+    texture2d<half, access::read> inTex [[texture(0)]],
+    texture2d<half, access::read> tmpTex [[texture(1)]],
+    texture2d<half, access::write> outTex [[texture(2)]],
+    constant ClarityUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    constexpr float kEps = 0.0009765625f;
+    constexpr float kSigmaR = 0.85f;
+    float invTwoSigmaR2 = 0.5f / (kSigmaR * kSigmaR);
+    int stride = max(int(u.stride), 1);
+    float sigmaS = 2.0f * float(stride);
+    float invTwoSigmaS2 = 0.5f / (sigmaS * sigmaS);
+
+    float2 centerData = float2(tmpTex.read(gid).rg);
+    float Lc = centerData.x;
+    float3 rgb = max(float3(inTex.read(gid).rgb), float3(0.0f));
+    float Yc = max(dot(rgb, kRec2020Luma), 0.0f);
+
+    int maxY = int(u.height) - 1;
+    int y = int(gid.y);
+    float sumW = 0.0f;
+    float sumL = 0.0f;
+
+    for (int k = -4; k <= 4; ++k) {
+        int sy = clamp(y + k * stride, 0, maxY);
+        float dy = float(k * stride);
+        float2 qData = float2(tmpTex.read(uint2(gid.x, sy)).rg);
+        float dL = qData.x - Lc;
+        float w = exp(-(dy * dy) * invTwoSigmaS2 - (dL * dL) * invTwoSigmaR2);
+        sumL += w * qData.y;
+        sumW += w;
+    }
+
+    float Lbase = (sumW > 1e-6f) ? (sumL / sumW) : Lc;
+    float detail = Lc - Lbase;
+
+    float wMid = smoothstep(0.005f, 0.04f, Yc) * (1.0f - 0.5f * smoothstep(1.0f, 4.0f, Yc));
+    float cNorm = clamp(u.clarity * 0.01f, -1.0f, 1.0f);
+    float taper = 1.0f / (1.0f + (detail * detail) / (0.65f * 0.65f));
+    float gainFactor = (cNorm >= 0.0f)
+        ? (1.0f + cNorm * 0.90f * wMid * taper)
+        : (1.0f + cNorm * 0.70f * wMid);
+
+    float YOut = max(exp2(Lbase + detail * gainFactor) - kEps, 0.0f);
+    float scale = (Yc > 1e-6f) ? clamp(YOut / Yc, 0.1f, 8.0f) : 1.0f;
+    float3 rgbOut = isfinite(scale) ? max(rgb * scale, float3(0.0f)) : rgb;
+
+    outTex.write(half4(half3(rgbOut), 1.0h), gid);
+}
+
+/* Physical Inverse-Diffusion Optical Sharpness ported from darktable/src/iop/diffuse.c (GPL-3.0-or-later) */
+struct OpticalSharpnessUniforms {
+    uint width;
+    uint height;
+    float dt;
+    float pad0;
+};
+
+kernel void optical_sharpness_init_kernel(
+    texture2d<half, access::read> inTex [[texture(0)]],
+    texture2d<float, access::write> diffTex [[texture(1)]],
+    constant OpticalSharpnessUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    float3 rgb = max(float3(inTex.read(gid).rgb), float3(0.0f));
+    float Y = max(dot(rgb, kRec2020Luma), 0.0f);
+    diffTex.write(float4(sqrt(Y), 0.0f, 0.0f, 1.0f), gid);
+}
+
+kernel void optical_sharpness_diffuse_step_kernel(
+    texture2d<float, access::read> inDiffTex [[texture(0)]],
+    texture2d<float, access::write> outDiffTex [[texture(1)]],
+    constant OpticalSharpnessUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    int maxX = int(u.width) - 1;
+    int maxY = int(u.height) - 1;
+    int x = int(gid.x);
+    int y = int(gid.y);
+
+    float p[9];
+    int idx = 0;
+    float uSum = 0.0f;
+    float uMin = 1e30f;
+    float uMax = -1e30f;
+    for (int dy = -1; dy <= 1; ++dy) {
+        int sy = clamp(y + dy, 0, maxY);
+        for (int dx = -1; dx <= 1; ++dx) {
+            int sx = clamp(x + dx, 0, maxX);
+            float val = inDiffTex.read(uint2(sx, sy)).r;
+            p[idx++] = val;
+            uSum += val;
+            uMin = min(uMin, val);
+            uMax = max(uMax, val);
+        }
+    }
+
+    // Centered gradient & directional anisotropy (diffuse.c:823-906)
+    float gx = 0.5f * (p[5] - p[3]);
+    float gy = 0.5f * (p[7] - p[1]);
+    float mag = length(float2(gx, gy));
+    float cosT = (mag > 1e-6f) ? (gx / mag) : 1.0f;
+    float sinT = (mag > 1e-6f) ? (gy / mag) : 0.0f;
+
+    float c2 = exp(-mag * 4.0f);
+    float a00 = c2 * cosT * cosT + sinT * sinT;
+    float a11 = cosT * cosT + c2 * sinT * sinT;
+    float a01 = (1.0f - c2) * cosT * sinT;
+
+    float lap = a01 * 0.5f * (p[0] - p[2] - p[6] + p[8])
+              + a11 * (p[1] + p[7])
+              + a00 * (p[3] + p[5])
+              - 2.0f * (a00 + a11) * p[4];
+
+    // Dark/flat noise suppression gate
+    float uMean = uSum * (1.0f / 9.0f);
+    float locVar = 0.0f;
+    for (int k = 0; k < 9; ++k) {
+        float d = p[k] - uMean;
+        locVar += d * d;
+    }
+    float locStd = sqrt(max(locVar * (1.0f / 9.0f), 0.0f));
+    float noiseGate = smoothstep(0.012f, 0.045f, locStd) * smoothstep(0.10f, 0.28f, uMean);
+
+    // Inverse-diffusion step + 3x3 TVD / min-max anti-ringing limiter
+    float uCandidate = p[4] - u.dt * noiseGate * lap;
+    float margin = 0.15f * (uMax - uMin);
+    float uNext = clamp(uCandidate, max(uMin - margin, 0.0f), uMax + margin);
+    if (!isfinite(uNext)) {
+        uNext = p[4];
+    }
+    outDiffTex.write(float4(uNext, 0.0f, 0.0f, 1.0f), gid);
+}
+
+kernel void optical_sharpness_apply_kernel(
+    texture2d<half, access::read> inTex [[texture(0)]],
+    texture2d<float, access::read> diffTex [[texture(1)]],
+    texture2d<half, access::write> outTex [[texture(2)]],
+    constant OpticalSharpnessUniforms& u [[buffer(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= u.width || gid.y >= u.height) {
+        return;
+    }
+    float3 rgb = max(float3(inTex.read(gid).rgb), float3(0.0f));
+    float yOrig = dot(rgb, kRec2020Luma);
+    float uFinal = max(diffTex.read(gid).r, 0.0f);
+    float ySharp = uFinal * uFinal;
+    float gain = (yOrig > 1e-6f) ? clamp(ySharp / yOrig, 0.25f, 3.0f) : 1.0f;
+    float3 rgbOut = isfinite(gain) ? max(rgb * gain, float3(0.0f)) : rgb;
+    outTex.write(half4(half3(rgbOut), 1.0h), gid);
 }

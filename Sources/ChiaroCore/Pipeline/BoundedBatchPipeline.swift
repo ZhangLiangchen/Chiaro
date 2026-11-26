@@ -11,10 +11,82 @@ public enum BatchProgressEvent: Sendable {
     case batchCompleted(totalJobs: Int, succeeded: Int, failed: Int, elapsedSeconds: Double)
 }
 
+public typealias BatchProgressCallback = @Sendable (BatchProgressEvent) -> Void
+
+public struct JobDecodedDetails: Sendable, Equatable {
+    public let jobID: UUID
+    public let sourceURL: URL
+    public let backendUsed: RAWBackend
+    public let fallbackReason: String?
+    public let demosaicUsed: DemosaicAlgorithm?
+    public let opticsSource: ResolvedOpticsSource
+    public let lensMatched: String?
+
+    public init(
+        jobID: UUID,
+        sourceURL: URL,
+        backendUsed: RAWBackend,
+        fallbackReason: String?,
+        demosaicUsed: DemosaicAlgorithm?,
+        opticsSource: ResolvedOpticsSource,
+        lensMatched: String?
+    ) {
+        self.jobID = jobID
+        self.sourceURL = sourceURL
+        self.backendUsed = backendUsed
+        self.fallbackReason = fallbackReason
+        self.demosaicUsed = demosaicUsed
+        self.opticsSource = opticsSource
+        self.lensMatched = lensMatched
+    }
+}
+
+public enum BatchDetailedProgressEvent: Sendable {
+    case batchStarted(totalJobs: Int, presetID: String, formats: [OutputFormat])
+    case jobStarted(jobID: UUID, sourceURL: URL)
+    case jobDecoded(JobDecodedDetails)
+    case jobRendered(jobID: UUID, sourceURL: URL)
+    case jobCompleted(ExportResult)
+    case batchCompleted(totalJobs: Int, succeeded: Int, failed: Int, elapsedSeconds: Double)
+
+    public var legacyEvent: BatchProgressEvent {
+        switch self {
+        case let .batchStarted(totalJobs, presetID, formats):
+            return .batchStarted(totalJobs: totalJobs, presetID: presetID, formats: formats)
+        case let .jobStarted(jobID, sourceURL):
+            return .jobStarted(jobID: jobID, sourceURL: sourceURL)
+        case let .jobDecoded(details):
+            return .jobDecoded(
+                jobID: details.jobID,
+                sourceURL: details.sourceURL,
+                backendUsed: details.backendUsed,
+                fallbackReason: details.fallbackReason
+            )
+        case let .jobRendered(jobID, sourceURL):
+            return .jobRendered(jobID: jobID, sourceURL: sourceURL)
+        case let .jobCompleted(result):
+            return .jobCompleted(result)
+        case let .batchCompleted(totalJobs, succeeded, failed, elapsedSeconds):
+            return .batchCompleted(
+                totalJobs: totalJobs,
+                succeeded: succeeded,
+                failed: failed,
+                elapsedSeconds: elapsedSeconds
+            )
+        }
+    }
+}
+
+public typealias BatchDetailedProgressCallback = @Sendable (BatchDetailedProgressEvent) -> Void
+
 public final class BoundedBatchPipeline: Sendable {
+    public typealias PresetResolver = @Sendable (String) -> PresetSchema?
+
     private struct Stage1Output: Sendable {
         let index: Int
         let job: ExportJob
+        let effectivePreset: PresetSchema
+        let effectiveParams: EffectiveDevelopParams
         let startTime: ContinuousClock.Instant
         let decodedFrame: DecodedRAWFrame
         let wantCustomRenderedHDR: Bool
@@ -82,14 +154,15 @@ public final class BoundedBatchPipeline: Sendable {
 
         func prepareRenderSpec(
             job: ExportJob,
+            effectivePreset resolvedPreset: PresetSchema,
+            effectiveParams: EffectiveDevelopParams,
             wantCustomRenderedHDR: Bool
         ) -> (effectivePreset: PresetSchema, effectiveParams: EffectiveDevelopParams, hlgOptions: HLGVideoOptions, outputSpec: RenderOutputSpec) {
-            var effectivePreset = job.preset
+            var effectivePreset = resolvedPreset
             if wantCustomRenderedHDR {
                 effectivePreset.compatOptions.writeCustomRenderedHDR = true
             }
-            let effectiveParams = EffectiveDevelopParams.resolve(preset: effectivePreset, delta: job.delta)
-            let activeFormats = Self.deduplicatedFormats(job.activeFormats)
+            let activeFormats = Self.deduplicatedFormats(job.formatOverrides ?? effectivePreset.outputFormats)
 
             let needsStill10Bit = activeFormats.contains { $0 == .heic || $0 == .avif } && effectivePreset.bitDepth == .bit10
             let targetBitDepth: BitDepth = needsStill10Bit
@@ -159,17 +232,20 @@ public final class BoundedBatchPipeline: Sendable {
     private let scheduler: MemoryBudgetScheduler
     private let injectedEngine: MetalPipelineEngine?
     private let preAVIFPoolStatsHook: PreAVIFPoolStatsHook?
+    private let presetResolver: PresetResolver?
     private let libRawDecoder: LibRawDecoder
     private let isoProbe: ISO21496Probe
     private let hlgProbe: HLGVideoProbe
 
     public init(
         scheduler: MemoryBudgetScheduler = MemoryBudgetScheduler(),
-        metalEngine: MetalPipelineEngine? = nil
+        metalEngine: MetalPipelineEngine? = nil,
+        presetResolver: PresetResolver? = nil
     ) {
         self.scheduler = scheduler
         self.injectedEngine = metalEngine
         self.preAVIFPoolStatsHook = nil
+        self.presetResolver = presetResolver
         self.libRawDecoder = LibRawDecoder()
         self.isoProbe = ISO21496Probe()
         self.hlgProbe = HLGVideoProbe()
@@ -178,24 +254,75 @@ public final class BoundedBatchPipeline: Sendable {
     internal init(
         scheduler: MemoryBudgetScheduler = MemoryBudgetScheduler(),
         metalEngine: MetalPipelineEngine? = nil,
-        preAVIFPoolStatsHook: PreAVIFPoolStatsHook?
+        preAVIFPoolStatsHook: PreAVIFPoolStatsHook?,
+        presetResolver: PresetResolver? = nil
     ) {
         self.scheduler = scheduler
         self.injectedEngine = metalEngine
         self.preAVIFPoolStatsHook = preAVIFPoolStatsHook
+        self.presetResolver = presetResolver
         self.libRawDecoder = LibRawDecoder()
         self.isoProbe = ISO21496Probe()
         self.hlgProbe = HLGVideoProbe()
     }
 
+    private func resolvePreset(id: String) -> PresetSchema? {
+        if let resolved = presetResolver?(id) {
+            return resolved
+        }
+        return try? PresetLoader.loadBuiltIn(id: id)
+    }
+
     public func run(
         jobs: [ExportJob],
-        progressHandler: (@Sendable (BatchProgressEvent) -> Void)? = nil
+        progressHandler: BatchProgressCallback? = nil
+    ) async throws -> [ExportResult] {
+        try await executeBatch(jobs: jobs) { event in
+            progressHandler?(event.legacyEvent)
+        }
+    }
+
+    public func runDetailed(
+        jobs: [ExportJob],
+        progressHandler: BatchDetailedProgressCallback? = nil
+    ) async throws -> [ExportResult] {
+        try await executeBatch(jobs: jobs, progressHandler: progressHandler)
+    }
+
+    private func executeBatch(
+        jobs: [ExportJob],
+        progressHandler: BatchDetailedProgressCallback?
     ) async throws -> [ExportResult] {
         try Task.checkCancellation()
         let batchStart = ContinuousClock.now
-        let firstPresetID = jobs.first?.preset.id ?? ""
-        let firstFormats = jobs.first?.activeFormats ?? []
+
+        // Non-throwing pre-inspection so sidecar-switched presets (e.g. AVIF) and backends
+        // inform MemoryBudgetScheduler & hasAVIF limits without failing the batch on corrupt JSON.
+        let budgetJobs: [ExportJob] = jobs.map { job in
+            let sidecar = job.useSidecar ? (try? ChiaroSidecar.loadIfExists(for: job.inputURL)) : nil
+            var adjusted = job
+            if (job.cliOverrides?.presetExplicitlySpecified ?? false) == false,
+               let scPresetID = sidecar?.presetID,
+               var resolvedPreset = self.resolvePreset(id: scPresetID) {
+                if let avifOverride = job.avifCodecOverride {
+                    resolvedPreset.avifCodec = avifOverride
+                }
+                adjusted.preset = resolvedPreset
+            } else if let avifOverride = job.avifCodecOverride {
+                adjusted.preset.avifCodec = avifOverride
+            }
+            let resolvedBackend = job.cliOverrides?.backend
+                ?? job.delta?.decodeBackendOverride
+                ?? sidecar?.delta?.decodeBackendOverride
+                ?? sidecar?.decodeBackend
+            if let resolvedBackend {
+                adjusted.decodeOptions.backend = resolvedBackend
+            }
+            return adjusted
+        }
+
+        let firstPresetID = budgetJobs.first?.preset.id ?? ""
+        let firstFormats = budgetJobs.first?.activeFormats ?? []
         progressHandler?(.batchStarted(totalJobs: jobs.count, presetID: firstPresetID, formats: firstFormats))
 
         guard !jobs.isEmpty else {
@@ -203,7 +330,7 @@ public final class BoundedBatchPipeline: Sendable {
             return []
         }
 
-        let budget = scheduler.budget(for: jobs)
+        let budget = scheduler.budget(for: budgetJobs)
         let engine = try injectedEngine ?? MetalPipelineEngine(poolMaxBytes: budget.metalPoolMaxBytes)
         defer {
             _ = engine.texturePool.evictIdle()
@@ -218,7 +345,7 @@ public final class BoundedBatchPipeline: Sendable {
         let avifEncoder = AVIFGridEncoder(speed: 6, maxThreads: budget.avifMaxThreads)
         let hlgEncoder = HLGVideoEncoder(metalEngine: engine)
 
-        let hasAVIF = jobs.contains { $0.activeFormats.contains(.avif) }
+        let hasAVIF = budgetJobs.contains { $0.activeFormats.contains(.avif) }
         let stage1To2 = BoundedAsyncChannel<Stage1Output>(capacity: budget.stage1To2Capacity)
         let stage2To3 = BoundedAsyncChannel<Stage2Output>(capacity: budget.stage2To3Capacity)
         let framePermitPool = scheduler.makeSemaphore(
@@ -226,7 +353,7 @@ public final class BoundedBatchPipeline: Sendable {
         )
         let avifEncodePermitPool = scheduler.makeSemaphore(permits: 1)
         let activeDecodeLimiter = scheduler.makeSemaphore(
-            permits: hasAVIF ? 1 : budget.decodeConcurrency
+            permits: hasAVIF ? 1 : min(2, budget.decodeConcurrency)
         )
         let effectiveEncodeJobConcurrency = hasAVIF ? 1 : budget.encodeJobConcurrency
 
@@ -249,8 +376,69 @@ public final class BoundedBatchPipeline: Sendable {
                                         let jobStart = ContinuousClock.now
                                         progressHandler?(.jobStarted(jobID: job.id, sourceURL: job.inputURL))
 
-                                        let activeFormats = Self.deduplicatedFormats(job.activeFormats)
-                                        let effectiveParams = EffectiveDevelopParams.resolve(preset: job.preset, delta: job.delta)
+                                        let sidecar: ChiaroSidecar?
+                                        do {
+                                            sidecar = job.useSidecar ? try ChiaroSidecar.loadIfExists(for: job.inputURL) : nil
+                                        } catch is CancellationError {
+                                            await framePermitPool.release()
+                                            throw CancellationError()
+                                        } catch {
+                                            await framePermitPool.release()
+                                            let sidecarName = ChiaroSidecar.sidecarURL(for: job.inputURL).lastPathComponent
+                                            let failed = ExportResult(
+                                                jobID: job.id,
+                                                sourceURL: job.inputURL,
+                                                backendUsed: job.cliOverrides?.backend ?? job.decodeOptions.backend,
+                                                fallbackReason: nil,
+                                                artifacts: [],
+                                                elapsedSeconds: Self.elapsedSeconds(since: jobStart),
+                                                errorDescription: "Failed to load sidecar '\(sidecarName)': \(error)"
+                                            )
+                                            await collector.record(failed, at: index)
+                                            progressHandler?(.jobCompleted(failed))
+                                            continue
+                                        }
+
+                                        var effectivePreset: PresetSchema
+                                        if (job.cliOverrides?.presetExplicitlySpecified ?? false) == false,
+                                           let scPresetID = sidecar?.presetID,
+                                           let resolvedSidecarPreset = self.resolvePreset(id: scPresetID) {
+                                            effectivePreset = resolvedSidecarPreset
+                                        } else {
+                                            effectivePreset = job.preset
+                                        }
+                                        if let avifOverride = job.avifCodecOverride {
+                                            effectivePreset.avifCodec = avifOverride
+                                        }
+
+                                        var effectiveParams = EffectiveDevelopParams.resolve(
+                                            preset: effectivePreset,
+                                            delta: job.delta,
+                                            sidecar: sidecar,
+                                            cliOverrides: job.cliOverrides,
+                                            presetResolver: { self.resolvePreset(id: $0) }
+                                        )
+
+                                        // Preserve caller's job.decodeOptions.backend / demosaicAlgorithm when
+                                        // no CLI, delta, or sidecar override was provided (protects AppViewModel).
+                                        let hasBackendOverride = job.cliOverrides?.backend != nil
+                                            || job.delta?.decodeBackendOverride != nil
+                                            || sidecar?.delta?.decodeBackendOverride != nil
+                                            || sidecar?.decodeBackend != nil
+                                        if !hasBackendOverride {
+                                            effectiveParams.decodeBackend = job.decodeOptions.backend
+                                        }
+                                        let hasDemosaicOverride = job.cliOverrides?.demosaic != nil
+                                            || job.delta?.demosaicOverride != nil
+                                            || sidecar?.delta?.demosaicOverride != nil
+                                            || sidecar?.demosaic != nil
+                                        if !hasDemosaicOverride {
+                                            effectiveParams.demosaic = job.decodeOptions.demosaicAlgorithm
+                                        }
+
+                                        let activeFormats = Self.deduplicatedFormats(
+                                            job.formatOverrides ?? effectivePreset.outputFormats
+                                        )
                                         if activeFormats == [.hlgMP4],
                                            let maxEdge = effectiveParams.maxLongEdge,
                                            maxEdge > 1920 {
@@ -259,7 +447,7 @@ public final class BoundedBatchPipeline: Sendable {
                                             let failed = ExportResult(
                                                 jobID: job.id,
                                                 sourceURL: job.inputURL,
-                                                backendUsed: job.decodeOptions.backend,
+                                                backendUsed: effectiveParams.decodeBackend,
                                                 fallbackReason: nil,
                                                 artifacts: [],
                                                 elapsedSeconds: Self.elapsedSeconds(since: jobStart),
@@ -270,9 +458,13 @@ public final class BoundedBatchPipeline: Sendable {
                                             continue
                                         }
 
-                                        let wantCustomRendered = job.preset.compatOptions.writeCustomRenderedHDR
+                                        let wantCustomRendered = effectivePreset.compatOptions.writeCustomRenderedHDR
+                                            || job.preset.compatOptions.writeCustomRenderedHDR
                                             || job.decodeOptions.customRenderedHDR
                                         var decodeOpts = job.decodeOptions
+                                        decodeOpts.backend = effectiveParams.decodeBackend
+                                        decodeOpts.demosaicAlgorithm = effectiveParams.demosaic
+                                        decodeOpts.highlightMode = effectiveParams.develop.highlightReconstruction
                                         decodeOpts.maxThreadsPerWorker = min(
                                             max(1, job.decodeOptions.maxThreadsPerWorker),
                                             budget.maxThreadsPerDecodeWorker
@@ -312,17 +504,27 @@ public final class BoundedBatchPipeline: Sendable {
                                             continue
                                         }
 
-                                        progressHandler?(.jobDecoded(
+                                        let opticsInfo = OpticsPipelineEngine.resolveOpticsInfo(
+                                            frame: decodedFrame,
+                                            params: effectiveParams.optics
+                                        )
+
+                                        progressHandler?(.jobDecoded(JobDecodedDetails(
                                             jobID: job.id,
                                             sourceURL: job.inputURL,
                                             backendUsed: decodedFrame.backendUsed,
-                                            fallbackReason: decodedFrame.fallbackReason
-                                        ))
+                                            fallbackReason: decodedFrame.fallbackReason,
+                                            demosaicUsed: decodedFrame.demosaicUsed,
+                                            opticsSource: opticsInfo.source,
+                                            lensMatched: opticsInfo.lensMatched
+                                        )))
 
                                         do {
                                             try await stage1To2.send(Stage1Output(
                                                 index: index,
                                                 job: job,
+                                                effectivePreset: effectivePreset,
+                                                effectiveParams: effectiveParams,
                                                 startTime: jobStart,
                                                 decodedFrame: decodedFrame,
                                                 wantCustomRenderedHDR: wantCustomRendered
@@ -352,6 +554,8 @@ public final class BoundedBatchPipeline: Sendable {
                             guard let stage1Val = stage1Opt else { break }
                             let s1Index = stage1Val.index
                             let job = stage1Val.job
+                            let s1EffectivePreset = stage1Val.effectivePreset
+                            let s1EffectiveParams = stage1Val.effectiveParams
                             let s1StartTime = stage1Val.startTime
                             let wantCustomRenderedHDR = stage1Val.wantCustomRenderedHDR
                             let backendUsed = stage1Val.decodedFrame.backendUsed
@@ -371,6 +575,8 @@ public final class BoundedBatchPipeline: Sendable {
                                 try Task.checkCancellation()
                                 let specTuple = await renderCoordinator.prepareRenderSpec(
                                     job: job,
+                                    effectivePreset: s1EffectivePreset,
+                                    effectiveParams: s1EffectiveParams,
                                     wantCustomRenderedHDR: wantCustomRenderedHDR
                                 )
                                 resolvedSpec = specTuple
@@ -400,7 +606,7 @@ public final class BoundedBatchPipeline: Sendable {
 
                                 await renderCoordinator.pruneRenderedFrame(
                                     &rendered,
-                                    activeFormats: Self.deduplicatedFormats(job.activeFormats),
+                                    activeFormats: Self.deduplicatedFormats(job.formatOverrides ?? specTuple.effectivePreset.outputFormats),
                                     effectivePreset: specTuple.effectivePreset
                                 )
                                 renderedOpt = rendered
@@ -534,10 +740,10 @@ public final class BoundedBatchPipeline: Sendable {
         effectiveParams: EffectiveDevelopParams,
         outputSpec: RenderOutputSpec
     ) async throws -> RenderedFrame {
-        let frame = stage1.decodedFrame
+        var frame = stage1.decodedFrame
         _ = consume stage1
-        return try await engine.render(
-            frame: frame,
+        return try await engine.renderAndReleasePayload(
+            frame: &frame,
             params: effectiveParams,
             outputSpec: outputSpec
         )
@@ -574,7 +780,7 @@ public final class BoundedBatchPipeline: Sendable {
         var renderedOpt: RenderedFrame? = stage2.renderedFrame
         _ = consume stage2
 
-        let activeFormats = Self.deduplicatedFormats(job.activeFormats)
+        let activeFormats = Self.deduplicatedFormats(job.formatOverrides ?? preset.outputFormats)
 
         guard !activeFormats.isEmpty else {
             renderedOpt = nil
@@ -589,12 +795,15 @@ public final class BoundedBatchPipeline: Sendable {
             )
         }
 
+        var pathJob = job
+        pathJob.preset = preset
+
         var targets: [(format: OutputFormat, url: URL)] = []
         var errors: [String] = []
 
         for format in activeFormats {
             do {
-                switch try pathCoordinator.resolveAndReserve(job: job, format: format) {
+                switch try pathCoordinator.resolveAndReserve(job: pathJob, format: format) {
                 case .write(let destURL):
                     targets.append((format: format, url: destURL))
                 case .skip:

@@ -18,6 +18,9 @@ public struct ExportJob: Sendable, Codable, Equatable, Hashable, Identifiable {
     public var useFormatSubdirectories: Bool
     public var conflictPolicy: ConflictPolicy
     public var verifyAfterExport: Bool
+    public var cliOverrides: CLIDevelopOverrides?
+    public var useSidecar: Bool
+    public var avifCodecOverride: AVIFCodecChoice?
 
     public init(
         id: UUID = UUID(),
@@ -30,7 +33,10 @@ public struct ExportJob: Sendable, Codable, Equatable, Hashable, Identifiable {
         namingTemplate: String = "{name}_HDR.{ext}",
         useFormatSubdirectories: Bool = false,
         conflictPolicy: ConflictPolicy = .overwrite,
-        verifyAfterExport: Bool = true
+        verifyAfterExport: Bool = true,
+        cliOverrides: CLIDevelopOverrides? = nil,
+        useSidecar: Bool = false,
+        avifCodecOverride: AVIFCodecChoice? = nil
     ) {
         self.id = id
         self.inputURL = inputURL
@@ -43,6 +49,44 @@ public struct ExportJob: Sendable, Codable, Equatable, Hashable, Identifiable {
         self.useFormatSubdirectories = useFormatSubdirectories
         self.conflictPolicy = conflictPolicy
         self.verifyAfterExport = verifyAfterExport
+        self.cliOverrides = cliOverrides
+        self.useSidecar = useSidecar
+        self.avifCodecOverride = avifCodecOverride
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case inputURL
+        case outputDirectory
+        case preset
+        case formatOverrides
+        case delta
+        case decodeOptions
+        case namingTemplate
+        case useFormatSubdirectories
+        case conflictPolicy
+        case verifyAfterExport
+        case cliOverrides
+        case useSidecar
+        case avifCodecOverride
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.inputURL = try c.decode(URL.self, forKey: .inputURL)
+        self.outputDirectory = try c.decode(URL.self, forKey: .outputDirectory)
+        self.preset = try c.decode(PresetSchema.self, forKey: .preset)
+        self.formatOverrides = try c.decodeIfPresent([OutputFormat].self, forKey: .formatOverrides)
+        self.delta = try c.decodeIfPresent(PerPhotoDelta.self, forKey: .delta)
+        self.decodeOptions = try c.decodeIfPresent(DecodeOptions.self, forKey: .decodeOptions) ?? .default
+        self.namingTemplate = try c.decodeIfPresent(String.self, forKey: .namingTemplate) ?? "{name}_HDR.{ext}"
+        self.useFormatSubdirectories = try c.decodeIfPresent(Bool.self, forKey: .useFormatSubdirectories) ?? false
+        self.conflictPolicy = try c.decodeIfPresent(ConflictPolicy.self, forKey: .conflictPolicy) ?? .overwrite
+        self.verifyAfterExport = try c.decodeIfPresent(Bool.self, forKey: .verifyAfterExport) ?? true
+        self.cliOverrides = try c.decodeIfPresent(CLIDevelopOverrides.self, forKey: .cliOverrides)
+        self.useSidecar = try c.decodeIfPresent(Bool.self, forKey: .useSidecar) ?? false
+        self.avifCodecOverride = try c.decodeIfPresent(AVIFCodecChoice.self, forKey: .avifCodecOverride)
     }
 
     public var activeFormats: [OutputFormat] {

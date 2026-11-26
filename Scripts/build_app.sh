@@ -2,16 +2,29 @@
 set -euo pipefail
 
 CONFIG="release"
-for arg in "$@"; do
-  case "$arg" in
-    --debug) CONFIG="debug" ;;
-    --release) CONFIG="release" ;;
+APP_VERSION="${CHIARO_VERSION:-1.1.0}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) CONFIG="debug"; shift ;;
+    --release) CONFIG="release"; shift ;;
+    --version)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --version requires a value" >&2
+        exit 1
+      fi
+      APP_VERSION="$2"
+      shift 2
+      ;;
+    --version=*)
+      APP_VERSION="${1#--version=}"
+      shift
+      ;;
     -h|--help)
-      echo "Usage: $0 [--debug|--release]"
+      echo "Usage: $0 [--debug|--release] [--version <ver>]"
       exit 0
       ;;
     *)
-      echo "Unknown option: $arg" >&2
+      echo "Unknown option: $1" >&2
       exit 1
       ;;
   esac
@@ -80,11 +93,47 @@ chmod 755 "$STAGING_APP/Contents/MacOS/$APP_NAME"
 
 cp -R "$BUNDLE_PATH" "$STAGING_APP/Contents/Resources/$BUNDLE_NAME"
 
-# Bundle permissive non-system dylibs (BSD SVT-AV1 / libaom / dav1d / libvmaf)
+APP_ICON_SRC="$ROOT_DIR/Assets/AppIcon.icns"
+if [[ ! -f "$APP_ICON_SRC" ]]; then
+  echo "ERROR: App icon missing at $APP_ICON_SRC" >&2
+  exit 1
+fi
+cp "$APP_ICON_SRC" "$STAGING_APP/Contents/Resources/AppIcon.icns"
+
+# Verify critical bundled resources (Shaders.metal, Presets, and LensfunDB XMLs)
+APP_RES_BUNDLE="$STAGING_APP/Contents/Resources/$BUNDLE_NAME"
+if ! find "$APP_RES_BUNDLE" -name 'Shaders.metal' | grep -q .; then
+  echo "ERROR: Shaders.metal missing from $APP_RES_BUNDLE" >&2
+  exit 1
+fi
+if ! find "$APP_RES_BUNDLE" -path '*/Presets/*.json' | grep -q .; then
+  echo "ERROR: Preset JSON files missing from $APP_RES_BUNDLE" >&2
+  exit 1
+fi
+if find "$ROOT_DIR/Sources/ChiaroCore/Resources/LensfunDB" -maxdepth 1 -name '*.xml' 2>/dev/null | grep -q .; then
+  if ! find "$APP_RES_BUNDLE" -path '*/LensfunDB/*.xml' | grep -q .; then
+    echo "ERROR: LensfunDB XML files missing from $APP_RES_BUNDLE" >&2
+    exit 1
+  fi
+fi
+
+# Bundle GPL-3.0-compatible non-system dylibs (SVT-AV1 / libaom / dav1d / libvmaf / glib if dynamically linked)
 # recursively so Chiaro.app runs standalone on any Apple Silicon Mac without Homebrew.
-echo "==> Bundling standalone BSD codec dylibs into Contents/Frameworks..."
+echo "==> Bundling standalone dynamic libraries into Contents/Frameworks..."
 FRAMEWORKS_DIR="$STAGING_APP/Contents/Frameworks"
 MAIN_EXEC="$STAGING_APP/Contents/MacOS/$APP_NAME"
+
+resolve_rpath_dylib() {
+  local rel="$1"
+  local cand
+  for cand in "$ROOT_DIR/Vendor/install/lib/$rel" /opt/homebrew/opt/*/lib/"$rel"; do
+    if [[ -f "$cand" ]]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
 
 bundle_deps_for() {
   local target="$1"
@@ -93,7 +142,30 @@ bundle_deps_for() {
   while IFS= read -r dep; do
     [[ -n "$dep" ]] || continue
     case "$dep" in
-      /System/*|/usr/lib/*|@*) continue ;;
+      /System/*|/usr/lib/*|@loader_path/*|@executable_path/*) continue ;;
+      @rpath/libswift*) continue ;;
+      @rpath/*)
+        local rel="${dep#@rpath/}"
+        local resolved_rpath
+        resolved_rpath="$(resolve_rpath_dylib "$rel" || true)"
+        if [[ -z "$resolved_rpath" || ! -f "$resolved_rpath" ]]; then
+          continue
+        fi
+        local base
+        base="$(basename "$resolved_rpath")"
+        local dest="$FRAMEWORKS_DIR/$base"
+        if [[ ! -f "$dest" ]]; then
+          cp -L "$resolved_rpath" "$dest"
+          chmod 755 "$dest"
+          install_name_tool -id "@loader_path/$base" "$dest"
+          bundle_deps_for "$dest" 0
+        fi
+        if [[ "$is_main" -eq 1 ]]; then
+          install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$target"
+        else
+          install_name_tool -change "$dep" "@loader_path/$base" "$target"
+        fi
+        ;;
       /*)
         if [[ ! -f "$dep" ]]; then
           echo "ERROR: Missing dynamic library dependency: $dep" >&2
@@ -130,7 +202,7 @@ for macho in "$MAIN_EXEC" "$FRAMEWORKS_DIR"/*.dylib; do
   fi
 done
 
-cat <<'PLIST' > "$STAGING_APP/Contents/Info.plist"
+cat <<PLIST > "$STAGING_APP/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -159,6 +231,8 @@ cat <<'PLIST' > "$STAGING_APP/Contents/Info.plist"
 	</array>
 	<key>CFBundleExecutable</key>
 	<string>Chiaro</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.zhangliangchen.chiaro</string>
 	<key>CFBundleInfoDictionaryVersion</key>
@@ -168,9 +242,9 @@ cat <<'PLIST' > "$STAGING_APP/Contents/Info.plist"
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>${APP_VERSION}</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>NSHighResolutionCapable</key>

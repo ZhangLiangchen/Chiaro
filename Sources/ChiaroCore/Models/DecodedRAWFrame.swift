@@ -11,6 +11,7 @@ public struct DecodeOptions: Sendable, Codable, Equatable, Hashable {
     public var isProxy: Bool
     public var maxThreadsPerWorker: Int
     public var customRenderedHDR: Bool
+    public var demosaicAlgorithm: DemosaicAlgorithm
 
     public static let `default` = DecodeOptions()
 
@@ -19,13 +20,15 @@ public struct DecodeOptions: Sendable, Codable, Equatable, Hashable {
         highlightMode: HighlightReconstructionMode = .opposedInpaint,
         isProxy: Bool = false,
         maxThreadsPerWorker: Int = 2,
-        customRenderedHDR: Bool = false
+        customRenderedHDR: Bool = false,
+        demosaicAlgorithm: DemosaicAlgorithm = .amaze
     ) {
         self.backend = backend
         self.highlightMode = highlightMode
         self.isProxy = isProxy
         self.maxThreadsPerWorker = maxThreadsPerWorker
         self.customRenderedHDR = customRenderedHDR
+        self.demosaicAlgorithm = demosaicAlgorithm
     }
 }
 
@@ -170,6 +173,15 @@ public struct DecodedRAWFrame: Sendable {
     public var colorMatrices: CameraColorMatrices
     public var isLosslessMS: Bool
     public var exif: WhitelistedExif
+    public var demosaicUsed: DemosaicAlgorithm?
+    public var embeddedSonyOptics: EmbeddedSonyOpticsPayload?
+    public var fullSensorDimensions: PixelDimensions?
+    public var cropFactor: Double?
+
+    public var lensModel: String? { exif.lensModel }
+    public var focalLengthMM: Double? { exif.focalLengthMM }
+    public var apertureFNumber: Double? { exif.fNumber }
+    public var isoSpeed: Int? { exif.isoSpeedRatings }
 
     public init(
         sourceURL: URL,
@@ -180,7 +192,11 @@ public struct DecodedRAWFrame: Sendable {
         orientation: Int,
         colorMatrices: CameraColorMatrices,
         isLosslessMS: Bool,
-        exif: WhitelistedExif
+        exif: WhitelistedExif,
+        demosaicUsed: DemosaicAlgorithm? = nil,
+        embeddedSonyOptics: EmbeddedSonyOpticsPayload? = nil,
+        fullSensorDimensions: PixelDimensions? = nil,
+        cropFactor: Double? = nil
     ) {
         self.sourceURL = sourceURL
         self.backendUsed = backendUsed
@@ -191,5 +207,9 @@ public struct DecodedRAWFrame: Sendable {
         self.colorMatrices = colorMatrices
         self.isLosslessMS = isLosslessMS
         self.exif = exif
+        self.demosaicUsed = demosaicUsed
+        self.embeddedSonyOptics = embeddedSonyOptics
+        self.fullSensorDimensions = fullSensorDimensions
+        self.cropFactor = cropFactor
     }
 }

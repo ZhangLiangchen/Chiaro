@@ -22,6 +22,14 @@ let package = Package(
             path: "Vendor/XCFrameworks/LibRaw.xcframework"
         ),
         .binaryTarget(
+            name: "LibRTProcess",
+            path: "Vendor/XCFrameworks/LibRTProcess.xcframework"
+        ),
+        .binaryTarget(
+            name: "LibLensfun",
+            path: "Vendor/XCFrameworks/LibLensfun.xcframework"
+        ),
+        .binaryTarget(
             name: "LibUltraHDR",
             path: "Vendor/XCFrameworks/LibUltraHDR.xcframework"
         ),
@@ -32,7 +40,7 @@ let package = Package(
 
         .target(
             name: "CLibRawBridge",
-            dependencies: ["LibRaw"],
+            dependencies: ["LibRaw", "LibRTProcess"],
             path: "Sources/CLibRawBridge",
             publicHeadersPath: "include",
             cxxSettings: [
@@ -42,6 +50,28 @@ let package = Package(
                 .linkedLibrary("c++"),
                 .linkedLibrary("z"),
                 .linkedLibrary("m"),
+            ]
+        ),
+        .target(
+            name: "CLensfunBridge",
+            dependencies: ["LibLensfun"],
+            path: "Sources/CLensfunBridge",
+            publicHeadersPath: "include",
+            cxxSettings: [
+                .define("CONF_LENSFUN_STATIC"),
+                .unsafeFlags(["-std=c++17"]),
+            ],
+            linkerSettings: [
+                .linkedLibrary("c++"),
+                .linkedLibrary("m"),
+                .linkedLibrary("iconv"),
+                .linkedFramework("Foundation"),
+                .linkedFramework("CoreFoundation"),
+                .unsafeFlags([
+                    "/opt/homebrew/opt/glib/lib/libglib-2.0.a",
+                    "/opt/homebrew/opt/gettext/lib/libintl.a",
+                    "/opt/homebrew/opt/pcre2/lib/libpcre2-8.a",
+                ]),
             ]
         ),
         .target(
@@ -78,6 +108,7 @@ let package = Package(
             name: "ChiaroCore",
             dependencies: [
                 "CLibRawBridge",
+                "CLensfunBridge",
                 "CUltraHDRBridge",
                 "CLibAVIFBridge",
             ],
@@ -85,6 +116,8 @@ let package = Package(
             resources: [
                 .copy("ColorMetal/Shaders.metal"),
                 .copy("../../Presets"),
+                .copy("Resources/LensfunDB"),
+                .copy("Resources/NoiseProfiles"),
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),

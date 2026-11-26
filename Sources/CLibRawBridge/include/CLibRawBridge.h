@@ -44,6 +44,26 @@ typedef enum HDRLibRawCFAPattern {
     HDR_LIBRAW_CFA_GBRG    = 4
 } HDRLibRawCFAPattern;
 
+typedef enum HDRLibRawDemosaicAlgorithm {
+    HDR_LIBRAW_DEMOSAIC_NONE  = -1,
+    HDR_LIBRAW_DEMOSAIC_AMAZE = 0,
+    HDR_LIBRAW_DEMOSAIC_LMMSE = 1,
+    HDR_LIBRAW_DEMOSAIC_DCB   = 2,
+    HDR_LIBRAW_DEMOSAIC_DHT   = 3,
+    HDR_LIBRAW_DEMOSAIC_AHD   = 4
+} HDRLibRawDemosaicAlgorithm;
+
+typedef struct HDRLibRawEmbeddedSonyOptics {
+    int32_t has_optics;
+    int32_t distortion_node_count;          /* 0..16 */
+    int16_t distortion_params[16];
+    int32_t ca_node_count;                  /* 0..16 */
+    int16_t ca_red_params[16];
+    int16_t ca_blue_params[16];
+    int32_t vignetting_node_count;          /* 0..16 */
+    int16_t vignetting_params[16];
+} HDRLibRawEmbeddedSonyOptics;
+
 typedef struct HDRLibRawDecodeOptions {
     HDRLibRawDecodeMode mode;
     HDRLibRawColorSpace output_color_space; /* Used for LINEAR_RGB16 / PROXY_RGB16 / sRAW fallback */
@@ -51,6 +71,7 @@ typedef struct HDRLibRawDecodeOptions {
     int max_threads;                        /* Capped [1..8]; LibRaw 0.22.3 built --disable-openmp */
     int apply_inset_crop;                   /* 1 = call adjust_to_raw_inset_crop(1, 0.55f) (default 1) */
     int sraw_no_rgb;                        /* 0 = default YCC->RGB; 1 = LIBRAW_RAWSPECIAL_SRAW_NO_RGB */
+    HDRLibRawDemosaicAlgorithm demosaic_algorithm; /* Full Bayer demosaic: AMAZE (default), LMMSE, DCB, DHT, AHD */
 } HDRLibRawDecodeOptions;
 
 /* Pure Exif 2.32 whitelist — NEVER contains MakerNote (0x927C) */
@@ -110,6 +131,10 @@ typedef struct HDRLibRawImage {
 
     uint32_t black_level[4];                /* Per-channel black + cblack[0..3] */
     uint32_t white_level;                   /* imgdata.color.maximum */
+
+    HDRLibRawDemosaicAlgorithm demosaic_used;
+    HDRLibRawEmbeddedSonyOptics embedded_sony_optics;
+    int32_t camera_format;                  /* imgdata.lens.makernotes.CameraFormat */
 
     HDRLibRawExifMetadata exif;
     int32_t error_code;                     /* HDRLibRawStatus or LibRaw error code */

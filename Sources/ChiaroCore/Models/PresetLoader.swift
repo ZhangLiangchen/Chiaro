@@ -155,6 +155,8 @@ public enum PresetLoader {
             ("sdrSaturation", d.sdrSaturation, -100.0...100.0),
             ("hdrHighlightExcitation", d.hdrHighlightExcitation, 0.0...100.0),
             ("hdrRolloffSoftness", d.hdrRolloffSoftness, 0.0...100.0),
+            ("clarity", d.clarity, -100.0...100.0),
+            ("opticalSharpness", d.opticalSharpness, 0.0...100.0),
         ]
         for (name, value, range) in developChecks {
             guard value.isFinite && range.contains(value) else {

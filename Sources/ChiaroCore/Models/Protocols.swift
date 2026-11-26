@@ -1,4 +1,5 @@
 import Foundation
+import Metal
 
 public protocol ARWDecoderProtocol: Sendable {
     func decodeFull(url: URL, options: DecodeOptions) async throws -> DecodedRAWFrame
@@ -70,4 +71,19 @@ public protocol ComplianceProbeProtocol: Sendable {
 
 public protocol HLGVideoProbeProtocol: Sendable {
     func verify(url: URL, expected: HLGComplianceExpectation) async throws -> ComplianceReport
+}
+
+/// Stage 2B open-source optical correction stage (Embedded Sony `.ARW` curves / Lensfun XML DB -> Metal LUT).
+public protocol OpticalCorrectionStage: Sendable {
+    func resolveOptics(
+        frame: DecodedRAWFrame,
+        params: OpticalCorrectionParameters
+    ) -> OpticsResolutionInfo
+
+    func applyCorrection(
+        inputTexture: any MTLTexture,
+        frame: DecodedRAWFrame,
+        params: OpticalCorrectionParameters,
+        commandQueue: any MTLCommandQueue
+    ) async throws -> (texture: any MTLTexture, resolution: OpticsResolutionInfo)
 }

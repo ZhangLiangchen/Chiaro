@@ -26,11 +26,11 @@ from tests.common import (
     TestCase,
     assert_avif_compliant,
     assert_exif_clean_and_whitelisted,
+    assert_gpl3_compatible,
     assert_headroom_within_tol,
     assert_heic_compliant,
     assert_hlg_mp4_compliant,
     assert_jpeg_compliant,
-    assert_zero_gpl,
     parse_ndjson_lines,
 )
 
@@ -73,24 +73,27 @@ def get_tests() -> List[TestCase]:
     tests: List[TestCase] = []
 
     # =========================================================================
-    # F01: Zero GPL / Zero LGPL Native Deps & License Audit (6 tests)
+    # F01: GPL-3.0-or-later License Compatibility & SBOM Audit (6 tests)
     # =========================================================================
     def t1_f01_01(ctx: RunContext) -> None:
         script = ctx.cfg.repo_root / "Scripts" / "verify_licenses.sh"
         assert script.is_file(), f"Missing {script}"
         res = ctx.run_cmd(["bash", str(script)], cwd=ctx.cfg.repo_root)
         assert res.returncode == 0, f"verify_licenses.sh failed ({res.returncode}): {res.stderr}\n{res.stdout}"
-        ctx.note("verify_licenses.sh exited 0")
+        assert "SBOM" in res.stdout and "GPL-3.0-or-later" in res.stdout, (
+            f"verify_licenses.sh missing SBOM / GPL-3.0-or-later output:\n{res.stdout}"
+        )
+        ctx.note("verify_licenses.sh exited 0 with GPL-3.0-or-later SBOM summary")
 
     def t1_f01_02(ctx: RunContext) -> None:
         assert ctx.cfg.cli_bin is not None
-        assert_zero_gpl(ctx, ctx.cfg.cli_bin, check_symbols=True)
+        assert_gpl3_compatible(ctx, ctx.cfg.cli_bin, check_symbols=True)
 
     def t1_f01_03(ctx: RunContext) -> None:
         app = _require_app(ctx)
         info = check_app_bundle(ctx.cfg.tools, app)
         assert info["ok"], f"App bundle check errors: {info['errors']}"
-        assert_zero_gpl(ctx, Path(info["executable"]), check_symbols=True)
+        assert_gpl3_compatible(ctx, Path(info["executable"]), check_symbols=True)
 
     def t1_f01_04(ctx: RunContext) -> None:
         assert ctx.cfg.cli_bin is not None
@@ -101,8 +104,8 @@ def get_tests() -> List[TestCase]:
             ln for ln in res.stdout.splitlines()
             if any(tok in ln.lower() for tok in ("heif_", "x265_", "exiv2", "x264_", "de265"))
         ]
-        assert not hits, f"Forbidden exported/imported GPL/LGPL symbols found: {hits[:10]}"
-        ctx.note("nm -gU verified zero heif_/x265_/exiv2 symbols")
+        assert not hits, f"Forbidden exported/imported library symbols found: {hits[:10]}"
+        ctx.note("nm -gU verified zero heif_/x265_/exiv2/x264_/de265 symbols")
 
     def t1_f01_05(ctx: RunContext) -> None:
         out = ctx.test_out_dir("T1-F01-05")
@@ -123,13 +126,13 @@ def get_tests() -> List[TestCase]:
         info = check_app_bundle(ctx.cfg.tools, app)
         targets = [Path(info["executable"])] + machos
         for tgt in targets:
-            assert_zero_gpl(ctx, tgt, check_symbols=True)
+            assert_gpl3_compatible(ctx, tgt, check_symbols=True)
         ctx.note(f"Audited {len(targets)} binary/dylib targets in Vendor + Chiaro.app")
 
     tests.extend([
-        TestCase("T1-F01-01", 1, "F01", "License Audit Script Pass", t1_f01_01, "bash Scripts/verify_licenses.sh"),
-        TestCase("T1-F01-02", 1, "F01", "CLI Binary otool -L Audit", t1_f01_02, "otool -L <chiaro>"),
-        TestCase("T1-F01-03", 1, "F01", "App Binary otool -L Audit", t1_f01_03, "otool -L <Chiaro.app>/Contents/MacOS/Chiaro"),
+        TestCase("T1-F01-01", 1, "F01", "GPL-3.0 & SBOM Audit Script Pass", t1_f01_01, "bash Scripts/verify_licenses.sh"),
+        TestCase("T1-F01-02", 1, "F01", "CLI Binary GPL-3.0 Linkage Audit", t1_f01_02, "otool -L <chiaro>"),
+        TestCase("T1-F01-03", 1, "F01", "App Binary GPL-3.0 Linkage Audit", t1_f01_03, "otool -L <Chiaro.app>/Contents/MacOS/Chiaro"),
         TestCase("T1-F01-04", 1, "F01", "libultrahdr No-HEIF Linkage Check", t1_f01_04, "nm -gU <chiaro>"),
         TestCase("T1-F01-05", 1, "F01", "100% Offline Execution (sandbox-exec)", t1_f01_05, "sandbox-exec (deny network*) chiaro DSC02532.ARW --preset apple_heic"),
         TestCase("T1-F01-06", 1, "F01", "Vendor & App Bundle Symbol/Dylib License Scan", t1_f01_06, "otool -L + nm -gU across Vendor/**/*.dylib & Chiaro.app"),
@@ -870,7 +873,7 @@ def get_tests() -> List[TestCase]:
     def t1_f12_04(ctx: RunContext) -> None:
         app = _require_app(ctx)
         info = check_app_bundle(ctx.cfg.tools, app)
-        assert_zero_gpl(ctx, Path(info["executable"]), check_symbols=True)
+        assert_gpl3_compatible(ctx, Path(info["executable"]), check_symbols=True)
 
     def t1_f12_05(ctx: RunContext) -> None:
         app = _require_app(ctx)
@@ -898,7 +901,7 @@ def get_tests() -> List[TestCase]:
         TestCase("T1-F12-01", 1, "F12", "Chiaro.app Bundle Structure", t1_f12_01, "Verify Contents/{MacOS,Info.plist,Resources} & arm64 Mach-O"),
         TestCase("T1-F12-02", 1, "F12", "Info.plist Validity", t1_f12_02, "plutil -lint + PlistBuddy Info.plist keys"),
         TestCase("T1-F12-03", 1, "F12", "codesign --verify --deep --strict", t1_f12_03, "codesign --verify --deep --strict Chiaro.app"),
-        TestCase("T1-F12-04", 1, "F12", "Chiaro.app Zero GPL/LGPL", t1_f12_04, "otool -L + nm -gU Chiaro"),
+        TestCase("T1-F12-04", 1, "F12", "Chiaro.app GPL-3.0 License & Linkage Audit", t1_f12_04, "otool -L + nm -gU Chiaro"),
         TestCase("T1-F12-05", 1, "F12", "Chiaro.app Launch Smoke Check (3s)", t1_f12_05, "Launch Chiaro >=3s, SIGTERM, zero crash logs"),
     ])
 

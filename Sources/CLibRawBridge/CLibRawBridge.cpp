@@ -1,6 +1,8 @@
 #include "CLibRawBridge.h"
+#include <arpa/inet.h>
 #include <dispatch/dispatch.h>
 #include <libraw/libraw.h>
+#include <rtprocess/librtprocess.h>
 #include <algorithm>
 #include <cctype>
 #include <cfloat>
@@ -12,10 +14,33 @@
 #include <cstring>
 #include <ctime>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace {
+
+class ChiaroLibRaw : public LibRaw {
+public:
+    explicit ChiaroLibRaw(unsigned int flags = LIBRAW_OPTIONS_NONE) : LibRaw(flags) {}
+
+    HDRLibRawDemosaicAlgorithm requested_demosaic = HDR_LIBRAW_DEMOSAIC_AMAZE;
+    bool bayer_callback_invoked = false;
+    bool fallback_to_ahd = false;
+
+    void set_bayer_demosaic_callback(void (*cb)(void *)) {
+        callbacks.interpolate_bayer_cb = cb;
+    }
+
+    int fc_at(int row, int col) {
+        return FC(row, col);
+    }
+
+    void run_ahd_fallback() {
+        ahd_interpolate();
+        fallback_to_ahd = true;
+    }
+};
 
 struct ExifCallbackContext {
     std::string raw_make;
@@ -28,6 +53,29 @@ struct ExifCallbackContext {
     double exposure_bias_ev = 0.0;
     bool has_exposure_bias = false;
     bool has_gps_altitude_tag = false;
+
+    bool has_distortion = false;
+    int32_t distortion_node_count = 0;
+    int16_t distortion_params[16] = {};
+
+    bool has_ca = false;
+    int32_t ca_node_count = 0;
+    int16_t ca_red_params[16] = {};
+    int16_t ca_blue_params[16] = {};
+
+    bool has_vignetting = false;
+    int32_t vignetting_node_count = 0;
+    int16_t vignetting_params[16] = {};
+
+    bool has_sr2_offset = false;
+    bool has_sr2_length = false;
+    bool has_sr2_key = false;
+    bool sr2_decrypt_attempted = false;
+    uint32_t sr2_offset = 0;
+    uint32_t sr2_length = 0;
+    uint32_t sr2_key = 0;
+    unsigned int sr2_ord = 0x4949;
+    INT64 sr2_base = 0;
 };
 
 static std::string trim_ascii(const char *buf, size_t max_len) {
@@ -66,6 +114,13 @@ static char *dup_non_empty_trimmed(const char *s, size_t max_len) {
     return t.empty() ? nullptr : dup_non_empty(t.c_str());
 }
 
+static uint16_t read_u16(const uint8_t *p, unsigned int ord) {
+    if (ord == 0x4D4D) { /* 'MM' big-endian */
+        return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | static_cast<uint16_t>(p[1]));
+    }
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8));
+}
+
 static uint32_t read_u32(const uint8_t *p, unsigned int ord) {
     if (ord == 0x4D4D) { /* 'MM' big-endian */
         return (static_cast<uint32_t>(p[0]) << 24) |
@@ -78,6 +133,195 @@ static uint32_t read_u32(const uint8_t *p, unsigned int ord) {
            (static_cast<uint32_t>(p[1]) << 8) |
            (static_cast<uint32_t>(p[2]) << 16) |
            (static_cast<uint32_t>(p[3]) << 24);
+}
+
+static std::vector<int16_t> read_i16_array_from_stream(LibRaw_abstract_datastream *stream,
+                                                       int len,
+                                                       unsigned int ord) {
+    if (!stream || len <= 0 || len > 64) {
+        return {};
+    }
+    const size_t bytes_needed = static_cast<size_t>(len) * 2u;
+    std::vector<uint8_t> raw(bytes_needed, 0);
+    if (stream->read(raw.data(), 1, bytes_needed) != static_cast<int>(bytes_needed)) {
+        return {};
+    }
+    std::vector<int16_t> out(static_cast<size_t>(len), 0);
+    for (int i = 0; i < len; ++i) {
+        out[static_cast<size_t>(i)] = static_cast<int16_t>(read_u16(raw.data() + static_cast<size_t>(i) * 2u, ord));
+    }
+    return out;
+}
+
+static void parse_sony_distortion_array(const std::vector<int16_t> &arr, ExifCallbackContext *ctx) {
+    if (!ctx || ctx->has_distortion || arr.size() < 2) {
+        return;
+    }
+    int32_t nc = static_cast<int32_t>(arr[0]);
+    if (nc <= 0 || nc > 16 || arr.size() < static_cast<size_t>(1 + nc)) {
+        return;
+    }
+    ctx->distortion_node_count = nc;
+    std::memset(ctx->distortion_params, 0, sizeof(ctx->distortion_params));
+    for (int32_t i = 0; i < nc; ++i) {
+        ctx->distortion_params[i] = arr[static_cast<size_t>(1 + i)];
+    }
+    ctx->has_distortion = true;
+}
+
+static void parse_sony_ca_array(const std::vector<int16_t> &arr, ExifCallbackContext *ctx) {
+    if (!ctx || ctx->has_ca || arr.size() < 3) {
+        return;
+    }
+    int32_t total = static_cast<int32_t>(arr[0]);
+    if (total <= 0 || (total & 1) != 0) {
+        return;
+    }
+    int32_t nc = total / 2;
+    if (nc <= 0 || nc > 16 || arr.size() < static_cast<size_t>(1 + 2 * nc)) {
+        return;
+    }
+    ctx->ca_node_count = nc;
+    std::memset(ctx->ca_red_params, 0, sizeof(ctx->ca_red_params));
+    std::memset(ctx->ca_blue_params, 0, sizeof(ctx->ca_blue_params));
+    for (int32_t i = 0; i < nc; ++i) {
+        ctx->ca_red_params[i] = arr[static_cast<size_t>(1 + i)];
+        ctx->ca_blue_params[i] = arr[static_cast<size_t>(1 + nc + i)];
+    }
+    ctx->has_ca = true;
+}
+
+static void parse_sony_vignetting_array(const std::vector<int16_t> &arr, ExifCallbackContext *ctx) {
+    if (!ctx || ctx->has_vignetting || arr.size() < 2) {
+        return;
+    }
+    int32_t nc = static_cast<int32_t>(arr[0]);
+    if (nc <= 0 || nc > 16 || arr.size() < static_cast<size_t>(1 + nc)) {
+        return;
+    }
+    ctx->vignetting_node_count = nc;
+    std::memset(ctx->vignetting_params, 0, sizeof(ctx->vignetting_params));
+    for (int32_t i = 0; i < nc; ++i) {
+        ctx->vignetting_params[i] = arr[static_cast<size_t>(1 + i)];
+    }
+    ctx->has_vignetting = true;
+}
+
+/* Exact Sony SR2 decryption algorithm matching LibRaw::sony_decrypt */
+static void sony_decrypt_words(uint32_t *data, size_t len_words, uint32_t key) {
+    if (!data || len_words == 0) {
+        return;
+    }
+    uint32_t pad[128] = {};
+    unsigned int p = 0;
+    for (p = 0; p < 4; ++p) {
+        key = static_cast<uint32_t>(static_cast<uint64_t>(key) * 48828125ULL + 1ULL);
+        pad[p] = key;
+    }
+    pad[3] = (pad[3] << 1) | ((pad[0] ^ pad[2]) >> 31);
+    for (p = 4; p < 127; ++p) {
+        pad[p] = ((pad[p - 4] ^ pad[p - 2]) << 1) | ((pad[p - 3] ^ pad[p - 1]) >> 31);
+    }
+    for (p = 0; p < 127; ++p) {
+        pad[p] = htonl(pad[p]);
+    }
+    p = 127;
+    for (size_t i = 0; i < len_words; ++i) {
+        uint32_t next_pad = pad[(p + 1) & 127] ^ pad[(p + 65) & 127];
+        pad[p & 127] = next_pad;
+        data[i] ^= next_pad;
+        ++p;
+    }
+}
+
+static void try_decrypt_sr2_subifd(LibRaw_abstract_datastream *stream, ExifCallbackContext *ctx) {
+    if (!stream || !ctx || ctx->sr2_decrypt_attempted) {
+        return;
+    }
+    if (!ctx->has_sr2_offset || !ctx->has_sr2_length || !ctx->has_sr2_key) {
+        return;
+    }
+    if (ctx->has_distortion && ctx->has_ca && ctx->has_vignetting) {
+        return;
+    }
+    ctx->sr2_decrypt_attempted = true;
+
+    if (ctx->sr2_length < 16 || ctx->sr2_length > 10240000u) {
+        return;
+    }
+
+    const INT64 saved_pos = stream->tell();
+    const INT64 target_pos = static_cast<INT64>(ctx->sr2_offset) + ctx->sr2_base;
+    if (target_pos < 0 || stream->seek(target_pos, SEEK_SET) != 0) {
+        stream->seek(saved_pos, SEEK_SET);
+        return;
+    }
+
+    const size_t padded_bytes = ((static_cast<size_t>(ctx->sr2_length) + 3u) / 4u) * 4u;
+    std::vector<uint8_t> buf(padded_bytes, 0);
+    const int got = stream->read(buf.data(), 1, static_cast<size_t>(ctx->sr2_length));
+    stream->seek(saved_pos, SEEK_SET);
+    if (got != static_cast<int>(ctx->sr2_length)) {
+        return;
+    }
+
+    sony_decrypt_words(reinterpret_cast<uint32_t *>(buf.data()),
+                       static_cast<size_t>(ctx->sr2_length) / 4u,
+                       ctx->sr2_key);
+
+    const unsigned int ord = ctx->sr2_ord;
+    const uint16_t entries = read_u16(buf.data(), ord);
+    if (entries == 0 || entries > 512) {
+        return;
+    }
+
+    for (uint16_t i = 0; i < entries; ++i) {
+        const size_t entry_off = 2u + static_cast<size_t>(i) * 12u;
+        if (entry_off + 12u > static_cast<size_t>(ctx->sr2_length)) {
+            break;
+        }
+        const uint16_t sr2_tag = read_u16(buf.data() + entry_off, ord);
+        const uint16_t sr2_type = read_u16(buf.data() + entry_off + 2u, ord);
+        const uint32_t sr2_count = read_u32(buf.data() + entry_off + 4u, ord);
+        const uint32_t sr2_val_off = read_u32(buf.data() + entry_off + 8u, ord);
+
+        if (sr2_tag != 0x7982 && sr2_tag != 0x7980 && sr2_tag != 0x797d) {
+            continue;
+        }
+        if (sr2_type != LIBRAW_EXIFTAG_TYPE_SSHORT && sr2_type != LIBRAW_EXIFTAG_TYPE_SHORT) {
+            continue;
+        }
+        if (sr2_count == 0 || sr2_count > 64) {
+            continue;
+        }
+
+        const size_t data_bytes = static_cast<size_t>(sr2_count) * 2u;
+        size_t rel_off = 0;
+        if (data_bytes <= 4u) {
+            rel_off = entry_off + 8u;
+        } else {
+            if (sr2_val_off < ctx->sr2_offset) {
+                continue;
+            }
+            rel_off = static_cast<size_t>(sr2_val_off - ctx->sr2_offset);
+        }
+        if (rel_off + data_bytes > static_cast<size_t>(ctx->sr2_length)) {
+            continue;
+        }
+
+        std::vector<int16_t> arr(sr2_count, 0);
+        for (uint32_t k = 0; k < sr2_count; ++k) {
+            arr[k] = static_cast<int16_t>(read_u16(buf.data() + rel_off + static_cast<size_t>(k) * 2u, ord));
+        }
+
+        if (sr2_tag == 0x7982) {
+            parse_sony_distortion_array(arr, ctx);
+        } else if (sr2_tag == 0x7980) {
+            parse_sony_ca_array(arr, ctx);
+        } else if (sr2_tag == 0x797d) {
+            parse_sony_vignetting_array(arr, ctx);
+        }
+    }
 }
 
 static std::string read_ascii_tag(LibRaw_abstract_datastream *stream, int len) {
@@ -98,7 +342,7 @@ static void hdr_exif_parser_cb(void *context,
                                int len,
                                unsigned int ord,
                                void *ifp,
-                               INT64 /* base */) {
+                               INT64 base) {
     if (!context || !ifp) {
         return;
     }
@@ -109,6 +353,58 @@ static void hdr_exif_parser_cb(void *context,
 
     auto *ctx = static_cast<ExifCallbackContext *>(context);
     auto *stream = static_cast<LibRaw_abstract_datastream *>(ifp);
+
+    if (tag >= 0x100000) {
+        const int low_tag = tag & 0xFFFF;
+        if (low_tag == 0x7037 &&
+            (type == LIBRAW_EXIFTAG_TYPE_SSHORT || type == LIBRAW_EXIFTAG_TYPE_SHORT)) {
+            parse_sony_distortion_array(read_i16_array_from_stream(stream, len, ord), ctx);
+            return;
+        }
+        if (low_tag == 0x7035 &&
+            (type == LIBRAW_EXIFTAG_TYPE_SSHORT || type == LIBRAW_EXIFTAG_TYPE_SHORT)) {
+            parse_sony_ca_array(read_i16_array_from_stream(stream, len, ord), ctx);
+            return;
+        }
+        if (low_tag == 0x7032 &&
+            (type == LIBRAW_EXIFTAG_TYPE_SSHORT || type == LIBRAW_EXIFTAG_TYPE_SHORT)) {
+            parse_sony_vignetting_array(read_i16_array_from_stream(stream, len, ord), ctx);
+            return;
+        }
+        if (low_tag == 0x7200 && len >= 1) {
+            uint8_t raw4[4] = {0};
+            if (stream->read(raw4, 1, 4) == 4) {
+                ctx->sr2_offset = read_u32(raw4, ord);
+                ctx->sr2_ord = ord;
+                ctx->sr2_base = base;
+                ctx->has_sr2_offset = true;
+                try_decrypt_sr2_subifd(stream, ctx);
+            }
+            return;
+        }
+        if (low_tag == 0x7201 && len >= 1) {
+            uint8_t raw4[4] = {0};
+            if (stream->read(raw4, 1, 4) == 4) {
+                ctx->sr2_length = read_u32(raw4, ord);
+                ctx->sr2_ord = ord;
+                ctx->sr2_base = base;
+                ctx->has_sr2_length = true;
+                try_decrypt_sr2_subifd(stream, ctx);
+            }
+            return;
+        }
+        if (low_tag == 0x7221 && len >= 1) {
+            uint8_t raw4[4] = {0};
+            if (stream->read(raw4, 1, 4) == 4) {
+                ctx->sr2_key = read_u32(raw4, ord);
+                ctx->sr2_ord = ord;
+                ctx->sr2_base = base;
+                ctx->has_sr2_key = true;
+                try_decrypt_sr2_subifd(stream, ctx);
+            }
+            return;
+        }
+    }
 
     switch (tag) {
         case (0x100000 | 0x010F): /* IFD0 Make (raw ASCII before LibRaw simplify_make_model) */
@@ -269,6 +565,25 @@ static void populate_metadata_and_matrices(LibRaw *lr,
         out_image->has_forward_matrix = 0;
     }
 
+    out_image->camera_format = static_cast<int32_t>(lr->imgdata.lens.makernotes.CameraFormat);
+
+    HDRLibRawEmbeddedSonyOptics &opt = out_image->embedded_sony_optics;
+    std::memset(&opt, 0, sizeof(opt));
+    if (cb_ctx.has_distortion) {
+        opt.distortion_node_count = cb_ctx.distortion_node_count;
+        std::memcpy(opt.distortion_params, cb_ctx.distortion_params, sizeof(opt.distortion_params));
+    }
+    if (cb_ctx.has_ca) {
+        opt.ca_node_count = cb_ctx.ca_node_count;
+        std::memcpy(opt.ca_red_params, cb_ctx.ca_red_params, sizeof(opt.ca_red_params));
+        std::memcpy(opt.ca_blue_params, cb_ctx.ca_blue_params, sizeof(opt.ca_blue_params));
+    }
+    if (cb_ctx.has_vignetting) {
+        opt.vignetting_node_count = cb_ctx.vignetting_node_count;
+        std::memcpy(opt.vignetting_params, cb_ctx.vignetting_params, sizeof(opt.vignetting_params));
+    }
+    opt.has_optics = (cb_ctx.has_distortion || cb_ctx.has_ca || cb_ctx.has_vignetting) ? 1 : 0;
+
     HDRLibRawExifMetadata &ex = out_image->exif;
     ex.orientation = exif_orient;
     ex.make = !cb_ctx.raw_make.empty()
@@ -372,6 +687,14 @@ static HDRLibRawStatus validate_decode_options(const HDRLibRawDecodeOptions &opt
         set_image_error(out_image, HDR_LIBRAW_ERR_INVALID_ARG, 0, "Invalid decode mode");
         return HDR_LIBRAW_ERR_INVALID_ARG;
     }
+    if (opts.demosaic_algorithm != HDR_LIBRAW_DEMOSAIC_AMAZE &&
+        opts.demosaic_algorithm != HDR_LIBRAW_DEMOSAIC_LMMSE &&
+        opts.demosaic_algorithm != HDR_LIBRAW_DEMOSAIC_DCB &&
+        opts.demosaic_algorithm != HDR_LIBRAW_DEMOSAIC_DHT &&
+        opts.demosaic_algorithm != HDR_LIBRAW_DEMOSAIC_AHD) {
+        set_image_error(out_image, HDR_LIBRAW_ERR_INVALID_ARG, 0, "Invalid demosaic algorithm");
+        return HDR_LIBRAW_ERR_INVALID_ARG;
+    }
     if (opts.sraw_no_rgb != 0) {
         set_image_error(out_image,
                         HDR_LIBRAW_ERR_UNSUPPORTED,
@@ -388,7 +711,7 @@ struct ProxyDmaxContext {
     int32_t out_w;
     int32_t out_h;
     size_t num_chunks;
-    uint16_t local_max[4][4];
+    uint16_t local_max[8][4];
 };
 
 static void proxy_dmax_worker(void *raw_ctx, size_t chunk_idx) {
@@ -637,7 +960,7 @@ static bool try_fast_proxy_rgb16(LibRaw *lr,
     const uint16_t *raw_base = lr->imgdata.rawdata.raw_image;
     const uint16_t *raw_crop = raw_base + static_cast<size_t>(top) * raw_stride_u16 + static_cast<size_t>(left);
 
-    const int threads = std::min(std::max(opts.max_threads, 1), 4);
+    const int threads = std::min(std::max(opts.max_threads, 1), 8);
     const size_t num_chunks = std::min(static_cast<size_t>(threads), static_cast<size_t>(out_h));
     dispatch_queue_t q = (num_chunks > 1)
                              ? dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)
@@ -753,12 +1076,138 @@ static bool try_fast_proxy_rgb16(LibRaw *lr,
     out_image->bits_per_sample = 16;
     out_image->width = out_w;
     out_image->height = out_h;
+    out_image->demosaic_used = HDR_LIBRAW_DEMOSAIC_NONE;
 
     *out_status = HDR_LIBRAW_OK;
     return true;
 }
 
-static HDRLibRawStatus run_decode(LibRaw *lr,
+static void chiaro_interpolate_bayer_cb(void *data) {
+    if (!data) {
+        return;
+    }
+    auto *lr = static_cast<ChiaroLibRaw *>(data);
+    const int w = static_cast<int>(lr->imgdata.sizes.width);
+    const int h = static_cast<int>(lr->imgdata.sizes.height);
+    if (w <= 0 || h <= 0 || lr->imgdata.image == nullptr || lr->imgdata.idata.colors != 3) {
+        lr->run_ahd_fallback();
+        return;
+    }
+
+    const unsigned cfarray[2][2] = {
+        { static_cast<unsigned>(lr->fc_at(0, 0)), static_cast<unsigned>(lr->fc_at(0, 1)) },
+        { static_cast<unsigned>(lr->fc_at(1, 0)), static_cast<unsigned>(lr->fc_at(1, 1)) }
+    };
+    for (int r = 0; r < 2; ++r) {
+        for (int c = 0; c < 2; ++c) {
+            if (cfarray[r][c] > 2u) {
+                lr->run_ahd_fallback();
+                return;
+            }
+        }
+    }
+    if ((cfarray[0][0] & 1u) != (cfarray[1][1] & 1u)) {
+        lr->run_ahd_fallback();
+        return;
+    }
+
+    // Serialize the temporary float32 R/G/B/raw demosaic planes (~524 MB for 33MP)
+    // across concurrent LibRaw decode workers to bound batch peak RSS <= 4.5 GiB.
+    static std::mutex bayer_planes_mutex;
+    std::lock_guard<std::mutex> bayer_planes_lock(bayer_planes_mutex);
+
+    const size_t row_stride = static_cast<size_t>(w) + 16u;
+    const size_t total_floats = static_cast<size_t>(h) * row_stride;
+    std::vector<float> raw_plane(total_floats, 0.0f);
+    std::vector<float> red_plane(total_floats, 0.0f);
+    std::vector<float> green_plane(total_floats, 0.0f);
+    std::vector<float> blue_plane(total_floats, 0.0f);
+
+    std::vector<float *> raw_rows(static_cast<size_t>(h), nullptr);
+    std::vector<float *> red_rows(static_cast<size_t>(h), nullptr);
+    std::vector<float *> green_rows(static_cast<size_t>(h), nullptr);
+    std::vector<float *> blue_rows(static_cast<size_t>(h), nullptr);
+
+    for (int row = 0; row < h; ++row) {
+        const size_t off = static_cast<size_t>(row) * row_stride;
+        float *raw_row = raw_plane.data() + off;
+        raw_rows[static_cast<size_t>(row)] = raw_row;
+        red_rows[static_cast<size_t>(row)] = red_plane.data() + off;
+        green_rows[static_cast<size_t>(row)] = green_plane.data() + off;
+        blue_rows[static_cast<size_t>(row)] = blue_plane.data() + off;
+
+        for (int col = 0; col < w; ++col) {
+            const int ch = lr->fc_at(row, col);
+            const size_t px_idx = static_cast<size_t>(row) * static_cast<size_t>(w) + static_cast<size_t>(col);
+            raw_row[col] = static_cast<float>(lr->imgdata.image[px_idx][ch]);
+        }
+    }
+
+    auto never_cancel = [](double) -> bool { return false; };
+    rpError err = RP_WRONG_CFA;
+    if (lr->requested_demosaic == HDR_LIBRAW_DEMOSAIC_LMMSE) {
+        err = lmmse_demosaic(
+            w, h,
+            raw_rows.data(),
+            red_rows.data(),
+            green_rows.data(),
+            blue_rows.data(),
+            cfarray,
+            never_cancel,
+            2
+        );
+    } else {
+        err = amaze_demosaic(
+            w, h, 0, 0, w, h,
+            raw_rows.data(),
+            red_rows.data(),
+            green_rows.data(),
+            blue_rows.data(),
+            cfarray,
+            never_cancel,
+            1.0,
+            0,
+            65535.0f,
+            65535.0f,
+            2,
+            false
+        );
+    }
+
+    if (err != RP_NO_ERROR) {
+        lr->run_ahd_fallback();
+        return;
+    }
+
+    auto clamp_u16 = [](float v) -> ushort {
+        if (!std::isfinite(v)) {
+            return 0;
+        }
+        long lv = std::lroundf(v);
+        if (lv <= 0) {
+            return 0;
+        }
+        if (lv >= 65535) {
+            return 65535;
+        }
+        return static_cast<ushort>(lv);
+    };
+
+    for (int row = 0; row < h; ++row) {
+        const float *r_row = red_rows[static_cast<size_t>(row)];
+        const float *g_row = green_rows[static_cast<size_t>(row)];
+        const float *b_row = blue_rows[static_cast<size_t>(row)];
+        for (int col = 0; col < w; ++col) {
+            const size_t px_idx = static_cast<size_t>(row) * static_cast<size_t>(w) + static_cast<size_t>(col);
+            lr->imgdata.image[px_idx][0] = clamp_u16(r_row[col]);
+            lr->imgdata.image[px_idx][1] = clamp_u16(g_row[col]);
+            lr->imgdata.image[px_idx][2] = clamp_u16(b_row[col]);
+        }
+    }
+    lr->bayer_callback_invoked = true;
+}
+
+static HDRLibRawStatus run_decode(ChiaroLibRaw *lr,
                                   const ExifCallbackContext &cb_ctx,
                                   const HDRLibRawDecodeOptions &opts,
                                   HDRLibRawImage *out_image) {
@@ -834,6 +1283,7 @@ static HDRLibRawStatus run_decode(LibRaw *lr,
         out_image->bits_per_sample = (lr->imgdata.color.raw_bps > 0) ? static_cast<int32_t>(lr->imgdata.color.raw_bps) : 14;
         out_image->width = w;
         out_image->height = h;
+        out_image->demosaic_used = HDR_LIBRAW_DEMOSAIC_NONE;
         return HDR_LIBRAW_OK;
     }
 
@@ -852,11 +1302,42 @@ static HDRLibRawStatus run_decode(LibRaw *lr,
     lr->imgdata.params.user_flip = 0;
     lr->imgdata.params.output_color = (opts.output_color_space == HDR_LIBRAW_CS_LINEAR_REC2020) ? 8 : 0;
 
+    lr->requested_demosaic = opts.demosaic_algorithm;
+    lr->bayer_callback_invoked = false;
+    lr->fallback_to_ahd = false;
+
     if (opts.mode == HDR_LIBRAW_MODE_PROXY_RGB16) {
+        lr->set_bayer_demosaic_callback(nullptr);
         lr->imgdata.params.half_size = 1;
         lr->imgdata.params.user_qual = 0;
+    } else if (is_sraw) {
+        lr->set_bayer_demosaic_callback(nullptr);
+        lr->imgdata.params.half_size = 0;
+        lr->imgdata.params.user_qual = 3;
     } else {
         lr->imgdata.params.half_size = 0;
+        switch (opts.demosaic_algorithm) {
+            case HDR_LIBRAW_DEMOSAIC_AMAZE:
+            case HDR_LIBRAW_DEMOSAIC_LMMSE:
+                lr->set_bayer_demosaic_callback(chiaro_interpolate_bayer_cb);
+                lr->imgdata.params.user_qual = 3; /* Safe fallback if filters <= 1000 */
+                break;
+            case HDR_LIBRAW_DEMOSAIC_DCB:
+                lr->set_bayer_demosaic_callback(nullptr);
+                lr->imgdata.params.user_qual = 4;
+                lr->imgdata.params.dcb_iterations = 1;
+                lr->imgdata.params.dcb_enhance_fl = 1;
+                break;
+            case HDR_LIBRAW_DEMOSAIC_DHT:
+                lr->set_bayer_demosaic_callback(nullptr);
+                lr->imgdata.params.user_qual = 11;
+                break;
+            case HDR_LIBRAW_DEMOSAIC_AHD:
+            default:
+                lr->set_bayer_demosaic_callback(nullptr);
+                lr->imgdata.params.user_qual = 3;
+                break;
+        }
     }
 
     int proc_err = lr->dcraw_process();
@@ -897,6 +1378,13 @@ static HDRLibRawStatus run_decode(LibRaw *lr,
     out_image->bits_per_sample = 16;
     out_image->width = static_cast<int32_t>(mem_img->width);
     out_image->height = static_cast<int32_t>(mem_img->height);
+    if (opts.mode == HDR_LIBRAW_MODE_PROXY_RGB16 || is_sraw) {
+        out_image->demosaic_used = HDR_LIBRAW_DEMOSAIC_NONE;
+    } else if (lr->fallback_to_ahd || (lr->imgdata.process_warnings & LIBRAW_WARN_FALLBACK_TO_AHD) != 0) {
+        out_image->demosaic_used = HDR_LIBRAW_DEMOSAIC_AHD;
+    } else {
+        out_image->demosaic_used = opts.demosaic_algorithm;
+    }
 
     LibRaw::dcraw_clear_mem(mem_img);
     return HDR_LIBRAW_OK;
@@ -918,6 +1406,7 @@ HDRLibRawDecodeOptions hdr_libraw_default_options(void) {
     opts.max_threads = 2;
     opts.apply_inset_crop = 1;
     opts.sraw_no_rgb = 0;
+    opts.demosaic_algorithm = HDR_LIBRAW_DEMOSAIC_AMAZE;
     return opts;
 }
 
@@ -940,7 +1429,7 @@ HDRLibRawStatus hdr_libraw_decode_file(const char *path,
     }
 
     try {
-        std::unique_ptr<LibRaw> lr(new LibRaw(LIBRAW_OPTIONS_NO_DATAERR_CALLBACK));
+        std::unique_ptr<ChiaroLibRaw> lr(new ChiaroLibRaw(LIBRAW_OPTIONS_NO_DATAERR_CALLBACK));
         ExifCallbackContext cb_ctx;
         lr->set_exifparser_handler(hdr_exif_parser_cb, &cb_ctx);
 
@@ -1001,7 +1490,7 @@ HDRLibRawStatus hdr_libraw_decode_buffer(const void *buffer,
     }
 
     try {
-        std::unique_ptr<LibRaw> lr(new LibRaw(LIBRAW_OPTIONS_NO_DATAERR_CALLBACK));
+        std::unique_ptr<ChiaroLibRaw> lr(new ChiaroLibRaw(LIBRAW_OPTIONS_NO_DATAERR_CALLBACK));
         ExifCallbackContext cb_ctx;
         lr->set_exifparser_handler(hdr_exif_parser_cb, &cb_ctx);
 
